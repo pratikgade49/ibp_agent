@@ -37,7 +37,7 @@ TOOL_REGISTRY = {
 TOOL_SCHEMAS = [
    {
        "name": "get_forecast_vs_consumption",
-       "description": "Compare statistical forecast vs actual consumption for a location/product and flag variance above threshold.",
+    "description": "Compare statistical forecast vs actual consumption for optional product and location filters. Omit either filter to include all matching products or locations.",
        "input_schema": {
            "type": "object",
            "properties": {
@@ -45,18 +45,18 @@ TOOL_SCHEMAS = [
                "product": {"type": "string", "description": "Product ID, e.g. 'Product A'"},
                "threshold_pct": {"type": "number", "description": "Variance % threshold, default 20"},
            },
-           "required": ["location", "product"],
+           "required": [],
        },
    },
    {
        "name": "detect_forecast_anomalies",
-       "description": "Scan a product line's consensus forecast time series for spikes, drops, and flatlines.",
+       "description": "Scan statistical forecast time series for spikes, drops, and flatlines across products.",
        "input_schema": {
            "type": "object",
            "properties": {
-               "product_line": {"type": "string", "description": "e.g. 'Product Line B'"},
+               "sigma_threshold": {"type": "number", "description": "Anomaly threshold in standard deviations, default 3"},
+               "flatline_min_periods": {"type": "integer", "description": "Minimum identical periods for a flatline, default 4"},
            },
-           "required": ["product_line"],
        },
    },
    {

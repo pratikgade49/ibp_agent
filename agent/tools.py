@@ -27,8 +27,9 @@ USE_MOCK_DATA = os.environ.get("USE_MOCK_DATA", "true").lower() == "true"
 IBP_BASE_URL = os.environ.get("IBP_BASE_URL", "")
 IBP_USER = os.environ.get("IBP_USER", "")
 IBP_PASSWORD = os.environ.get("IBP_PASSWORD", "")
-IBP_PLANNING_AREA = os.environ.get("IBP_PLANNING_AREA", "YSAPIBP1")
+IBP_PLANNING_AREA = os.environ.get("IBP_PLANNING_AREA", "YCIBP1")
 IBP_PERIOD_LEVEL = os.environ.get("IBP_PERIOD_LEVEL", "3")
+IBP_UOM_TO_ID = os.environ.get("IBP_UOM_TO_ID", "EA")
 PLANNING_DATA_PATH = (
     "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV/"
     f"{IBP_PLANNING_AREA}"
@@ -36,12 +37,18 @@ PLANNING_DATA_PATH = (
 
 def _ibp_get(select: str, filter_: str) -> dict:
    """Shared GET against the IBP PlanningData OData collection."""
+   if "UOMTOID" in select and "UOMTOID" not in filter_:
+         filter_ = f"({filter_}) and UOMTOID eq '{IBP_UOM_TO_ID}'"
    url = f"{IBP_BASE_URL}{PLANNING_DATA_PATH}"
    params = {"$select": select, "$filter": filter_, "$format": "json"}
    resp = requests.get(
        url, params=params, auth=(IBP_USER, IBP_PASSWORD), timeout=30
    )
-   resp.raise_for_status()
+   if not resp.ok:
+       raise RuntimeError(
+           f"SAP IBP request failed with HTTP {resp.status_code}; "
+           f"select={select}; filter={filter_}; response={resp.text}"
+       )
    return resp.json()
 
 # ---------------------------------------------------------------------------
@@ -52,82 +59,107 @@ _MOCK_FORECAST_VS_CONSUMPTION = {
 }
 
 def get_forecast_vs_consumption(
-   location: str, product: str, threshold_pct: float = 20.0
+   location: str | None = None,
+   product: str | None = None,
+   threshold_pct: float = 20.0,
 ) -> dict:
    """
-   Compare statistical forecast vs actual consumption for a location/product
-   and flag if variance exceeds threshold_pct (default 20%, per the design
-   doc). Mirrors Joule skill: getForecastVsConsumption.
+   Compare statistical forecast vs actual consumption. Location and product
+   are optional; omitted filters return every matching combination.
    """
+   analyses = []
    if USE_MOCK_DATA:
-       key = (location, product)
-       data = _MOCK_FORECAST_VS_CONSUMPTION.get(
-           key, {"forecast": 10000, "actual": 10200}
-       )
-       forecast, actual = data["forecast"], data["actual"]
+       rows = [
+           {"location": row_location, "product": row_product, **values}
+           for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
+           if (location is None or row_location == location)
+           and (product is None or row_product == product)
+       ]
    else:
+       filters = [
+           f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+           f"PERIODID{IBP_PERIOD_LEVEL}_REL eq 0",
+       ]
+       if location:
+           filters.append(f"LOCID eq '{location}'")
+       if product:
+           filters.append(f"PRDID eq '{product}'")
        result = _ibp_get(
            select=(
                f"PRDID,LOCID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
-               "STATISTICALFORECAST,ACTUALSQTY"
+               "UOMTOID,STATISTICALFORECASTQTY,ACTUALSQTY"
            ),
-           filter_=(
-               f"LOCID eq '{location}' and PRDID eq '{product}' "
-               f"and PERIODID{IBP_PERIOD_LEVEL}_REL eq 0"
-           ),
+           filter_=" and ".join(filters),
        )
-       rows = result.get("d", {}).get("results", [])
-       if not rows:
-           return {"location": location, "product": product, "found": False}
-       forecast = float(rows[0]["STATISTICALFORECAST"])
-       actual = float(rows[0]["ACTUALSQTY"])
-   variance_pct = (abs(actual - forecast) / forecast) * 100 if forecast else 0.0
-   return {
-       "location": location,
-       "product": product,
-       "forecast": forecast,
-       "actual": actual,
-       "variance_pct": round(variance_pct, 1),
-       "alert": variance_pct > threshold_pct,
-       "direction": "over-consumption" if actual > forecast else "under-consumption",
+       rows = [
+           {
+               "location": row["LOCID"],
+               "product": row["PRDID"],
+               "forecast": float(row["STATISTICALFORECASTQTY"]),
+               "actual": float(row["ACTUALSQTY"]),
+           }
+           for row in result.get("d", {}).get("results", [])
+       ]
+   for row in rows:
+       forecast, actual = row["forecast"], row["actual"]
+       variance_pct = (abs(actual - forecast) / forecast) * 100 if forecast else 0.0
+       analyses.append(
+           {
+               **row,
+               "variance_pct": round(variance_pct, 1),
+               "alert": variance_pct > threshold_pct,
+               "direction": "over-consumption" if actual > forecast else "under-consumption",
+           }
+       )
+   response = {
+       "location_filter": location,
+       "product_filter": product,
+       "threshold_pct": threshold_pct,
+       "count": len(analyses),
+       "alert_count": sum(item["alert"] for item in analyses),
+       "results": analyses,
    }
+   if len(analyses) == 1:
+       response.update(analyses[0])
+   return response
 
 # ---------------------------------------------------------------------------
 # 2. Detect Anomaly in Forecast Pattern
 # ---------------------------------------------------------------------------
-_MOCK_CONSENSUS_FORECAST = {
-   "Product Line B": {
-       "B1": [1000, 1050, 4200, 1100, 1080, 1120],  # spike in month 3
-       "B4": [800, 800, 800, 800, 800, 800],  # flatline
-       "B7": [1200, 1250, 1230, 1260, 1245, 1255],  # normal
-   }
+_MOCK_STATISTICAL_FORECAST = {
+    "B1": [1000, 1050, 4200, 1100, 1080, 1120],  # spike in month 3
+    "B4": [800, 800, 800, 800, 800, 800],  # flatline
+    "B7": [1200, 1250, 1230, 1260, 1245, 1255],  # normal
 }
 
 def detect_forecast_anomalies(
-   product_line: str, sigma_threshold: float = 3.0, flatline_min_periods: int = 4
+    sigma_threshold: float = 3.0, flatline_min_periods: int = 4
 ) -> dict:
    """
-   Scan consensus forecast time series for spikes/drops (|delta| > sigma_threshold
+    Scan statistical forecast time series for spikes/drops (|delta| > sigma_threshold
    standard deviations) and flatlines (>= flatline_min_periods identical
    non-zero consecutive values). Mirrors Joule skill: detectForecastAnomalies.
    The statistical detection itself runs in deterministic Python, not in the
    LLM prompt -- the agent only reasons over the structured result below.
    """
    if USE_MOCK_DATA:
-       series_by_product = _MOCK_CONSENSUS_FORECAST.get(product_line, {})
+       series_by_product = _MOCK_STATISTICAL_FORECAST
    else:
        result = _ibp_get(
-           select="PRDID,LOCID,PERIODID,CONSENSUSFORECAST",
+           select=(
+               f"PRDID,LOCID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+               f"UOMTOID,STATISTICALFORECASTQTY"
+           ),
            filter_=(
-               f"PLANNINGAREAID eq 'SAPIBP1' and PRODUCTLINE eq '{product_line}' "
-               f"and PERIODID ge 'CURRENT_MONTH'"
+               f"UOMTOID eq '{IBP_UOM_TO_ID}' "
+               f"and PERIODID{IBP_PERIOD_LEVEL}_REL ge 0"
            ),
        )
        rows = result.get("d", {}).get("results", [])
        series_by_product = {}
        for row in rows:
            series_by_product.setdefault(row["PRDID"], []).append(
-               float(row["CONSENSUSFORECAST"])
+               float(row["STATISTICALFORECASTQTY"])
            )
    anomalies = []
    for product_id, series in series_by_product.items():
@@ -136,7 +168,7 @@ def detect_forecast_anomalies(
            _find_flatlines(product_id, series, flatline_min_periods)
        )
    return {
-       "product_line": product_line,
+       "forecast_type": "STATISTICALFORECASTQTY",
        "anomaly_count": len(anomalies),
        "anomalies": anomalies,
    }
@@ -215,11 +247,18 @@ def get_sales_history_status(target_period: Optional[str] = None) -> dict:
        last_loaded = _MOCK_LAST_LOADED_PERIOD
    else:
        result = _ibp_get(
-           select="PRDID,LOCID,PERIODID,HISTSALES",
-           filter_="PLANNINGAREAID eq 'SAPIBP1' and PERIODID eq 'LAST_CLOSED_PERIOD'",
+           select=(
+               f"PRDID,LOCID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+               f"UOMTOID,HISTSALES"
+           ),
+           filter_=(
+               f"UOMTOID eq '{IBP_UOM_TO_ID}' "
+               f"and PERIODID{IBP_PERIOD_LEVEL}_REL eq 0"
+           ),
        )
        rows = result.get("d", {}).get("results", [])
-       last_loaded = rows[0]["PERIODID"] if rows else None
+       period_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
+       last_loaded = rows[0][period_field][:7] if rows else None
    ready = last_loaded is not None and last_loaded >= target_period
    return {
        "target_period": target_period,
