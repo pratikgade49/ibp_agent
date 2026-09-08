@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class LLMClient:
-   def chat(self, system: str, messages: list, tools: list, max_tokens: int = 1024) -> dict:
+    def chat(self, system: str, messages: list, tools: list, max_tokens: int = 1024) -> dict:
        """Returns a single assistant message in the common format above."""
        raise NotImplementedError
 
@@ -169,12 +169,12 @@ class GeminiClient(LLMClient):
            raise RuntimeError("GOOGLE_API_KEY (or GEMINI_API_KEY) not set.")
        self._client = genai.Client(api_key=api_key)
        self._model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-   def chat(self, system: str, messages: list, tools: list, max_tokens: int = 1024) -> dict:
+   def chat(self, system: str, messages: list, tools: list, max_tokens: int = 4096) -> dict:
        from google.genai import types
        config = types.GenerateContentConfig(
            system_instruction=system,
            tools=[self._to_gemini_tool(tools)],
-           max_output_tokens=max_tokens,
+          max_output_tokens=max_tokens,
        )
        contents = self._to_gemini_contents(messages)
        response = self._client.models.generate_content(

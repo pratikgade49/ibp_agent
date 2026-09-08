@@ -10,6 +10,7 @@ destination configured, and the same functions will call the live
 PLANNING_DATA_API_SRV OData service instead.
 """
 import os
+import re
 import statistics
 from datetime import datetime
 from typing import Optional
@@ -34,6 +35,18 @@ PLANNING_DATA_PATH = (
     "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV/"
     f"{IBP_PLANNING_AREA}"
 )
+
+def _period_month(period_id) -> str | None:
+   """Convert SAP OData date values to a YYYY-MM display value."""
+   if not period_id:
+       return None
+   if isinstance(period_id, str):
+       match = re.search(r"/Date\((\d+)", period_id)
+       if match:
+           return datetime.utcfromtimestamp(int(match.group(1)) / 1000).strftime("%Y-%m")
+       if len(period_id) >= 7 and period_id[4] == "-":
+           return period_id[:7]
+   return None
 
 def _ibp_get(select: str, filter_: str) -> dict:
    """Shared GET against the IBP PlanningData OData collection."""
@@ -61,12 +74,24 @@ _MOCK_FORECAST_VS_CONSUMPTION = {
 def get_forecast_vs_consumption(
    location: str | None = None,
    product: str | None = None,
+    customer: str | None = None,
    threshold_pct: float = 20.0,
+    result_scope: str = "combination",
+    alert_direction: str = "both",
+    period_start_rel: int = 0,
+    period_end_rel: int = 0,
 ) -> dict:
    """
-   Compare statistical forecast vs actual consumption. Location and product
-   are optional; omitted filters return every matching combination.
+   Compare statistical forecast vs actual consumption. Location, product, and
+   customer are optional. Use result_scope="product" for product totals or
+   result_scope="combination" for product/location/customer detail.
    """
+   if result_scope not in {"product", "combination"}:
+       raise ValueError("result_scope must be 'product' or 'combination'")
+   if alert_direction not in {"over", "under", "both"}:
+       raise ValueError("alert_direction must be 'over', 'under', or 'both'")
+   if period_start_rel > period_end_rel:
+       raise ValueError("period_start_rel must not exceed period_end_rel")
    analyses = []
    if USE_MOCK_DATA:
        rows = [
@@ -74,19 +99,23 @@ def get_forecast_vs_consumption(
            for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
            if (location is None or row_location == location)
            and (product is None or row_product == product)
+           and customer is None
        ]
    else:
        filters = [
            f"UOMTOID eq '{IBP_UOM_TO_ID}'",
-           f"PERIODID{IBP_PERIOD_LEVEL}_REL eq 0",
+           f"PERIODID{IBP_PERIOD_LEVEL}_REL ge {period_start_rel}",
+           f"PERIODID{IBP_PERIOD_LEVEL}_REL le {period_end_rel}",
        ]
        if location:
            filters.append(f"LOCID eq '{location}'")
        if product:
            filters.append(f"PRDID eq '{product}'")
+       if customer:
+           filters.append(f"CUSTID eq '{customer}'")
        result = _ibp_get(
            select=(
-               f"PRDID,LOCID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+               f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
                "UOMTOID,STATISTICALFORECASTQTY,ACTUALSQTY"
            ),
            filter_=" and ".join(filters),
@@ -95,29 +124,66 @@ def get_forecast_vs_consumption(
            {
                "location": row["LOCID"],
                "product": row["PRDID"],
+               "customer": row.get("CUSTID"),
+               "period": _period_month(row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP")),
                "forecast": float(row["STATISTICALFORECASTQTY"]),
                "actual": float(row["ACTUALSQTY"]),
            }
            for row in result.get("d", {}).get("results", [])
        ]
+   if result_scope == "product":
+       grouped = {}
+       for row in rows:
+           group_key = (row["product"], row.get("period"))
+           grouped.setdefault(
+               group_key,
+               {
+                   "product": row["product"],
+                   "period": row.get("period"),
+                   "forecast": 0.0,
+                   "actual": 0.0,
+               },
+           )
+           grouped[group_key]["forecast"] += row["forecast"]
+           grouped[group_key]["actual"] += row["actual"]
+       rows = list(grouped.values())
    for row in rows:
        forecast, actual = row["forecast"], row["actual"]
-       variance_pct = (abs(actual - forecast) / forecast) * 100 if forecast else 0.0
+       variance_pct = ((actual - forecast) / forecast) * 100 if forecast else 0.0
+       direction = "over-consumption" if actual > forecast else "under-consumption"
+       direction_matches = (
+           alert_direction == "both"
+           or (alert_direction == "over" and direction == "over-consumption")
+           or (alert_direction == "under" and direction == "under-consumption")
+       )
        analyses.append(
            {
                **row,
                "variance_pct": round(variance_pct, 1),
-               "alert": variance_pct > threshold_pct,
-               "direction": "over-consumption" if actual > forecast else "under-consumption",
+               "alert": direction_matches and abs(variance_pct) > threshold_pct,
+               "direction": direction,
            }
        )
    response = {
        "location_filter": location,
        "product_filter": product,
+       "customer_filter": customer,
+       "result_scope": result_scope,
        "threshold_pct": threshold_pct,
+         "alert_direction": alert_direction,
+         "period_start_rel": period_start_rel,
+         "period_end_rel": period_end_rel,
        "count": len(analyses),
        "alert_count": sum(item["alert"] for item in analyses),
-       "results": analyses,
+       "alert_results": [
+           {
+               key: item[key]
+               for key in ("product", "location", "customer", "period", "forecast", "actual", "variance_pct", "direction")
+               if key in item
+           }
+           for item in analyses
+           if item["alert"]
+       ],
    }
    if len(analyses) == 1:
        response.update(analyses[0])
@@ -133,42 +199,86 @@ _MOCK_STATISTICAL_FORECAST = {
 }
 
 def detect_forecast_anomalies(
-    sigma_threshold: float = 3.0, flatline_min_periods: int = 4
+    product: str | None = None,
+    location: str | None = None,
+    customer: str | None = None,
+    sigma_threshold: float = 3.0,
+    flatline_min_periods: int = 4,
+    result_scope: str = "combination",
 ) -> dict:
    """
-    Scan statistical forecast time series for spikes/drops (|delta| > sigma_threshold
-   standard deviations) and flatlines (>= flatline_min_periods identical
-   non-zero consecutive values). Mirrors Joule skill: detectForecastAnomalies.
+    Scan statistical forecast time series for spikes/drops and flatlines.
+    Product, location, and customer filters are optional. Product scope
+    aggregates each product across locations and customers by period.
    The statistical detection itself runs in deterministic Python, not in the
    LLM prompt -- the agent only reasons over the structured result below.
    """
+   if result_scope not in {"product", "combination"}:
+       raise ValueError("result_scope must be 'product' or 'combination'")
    if USE_MOCK_DATA:
-       series_by_product = _MOCK_STATISTICAL_FORECAST
+       series_by_key = {
+           (row_product, None, None): {
+               index: value for index, value in enumerate(values)
+           }
+           for row_product, values in _MOCK_STATISTICAL_FORECAST.items()
+           if product is None or row_product == product
+       }
    else:
+       filters = [
+           f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+           f"PERIODID{IBP_PERIOD_LEVEL}_REL ge 0",
+       ]
+       if product:
+           filters.append(f"PRDID eq '{product}'")
+       if location:
+           filters.append(f"LOCID eq '{location}'")
+       if customer:
+           filters.append(f"CUSTID eq '{customer}'")
        result = _ibp_get(
            select=(
-               f"PRDID,LOCID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+               f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
                f"UOMTOID,STATISTICALFORECASTQTY"
            ),
-           filter_=(
-               f"UOMTOID eq '{IBP_UOM_TO_ID}' "
-               f"and PERIODID{IBP_PERIOD_LEVEL}_REL ge 0"
-           ),
+           filter_=" and ".join(filters),
        )
        rows = result.get("d", {}).get("results", [])
-       series_by_product = {}
+       series_by_key = {}
        for row in rows:
-           series_by_product.setdefault(row["PRDID"], []).append(
-               float(row["STATISTICALFORECASTQTY"])
+           timestamp = row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP", "")
+           key = (row["PRDID"],) if result_scope == "product" else (
+               row["PRDID"], row["LOCID"], row.get("CUSTID")
+           )
+           series_by_key.setdefault(key, {})
+           series_by_key[key][timestamp] = (
+               series_by_key[key].get(timestamp, 0.0)
+               + float(row["STATISTICALFORECASTQTY"])
            )
    anomalies = []
-   for product_id, series in series_by_product.items():
-       anomalies.extend(_find_spikes_and_drops(product_id, series, sigma_threshold))
-       anomalies.extend(
-           _find_flatlines(product_id, series, flatline_min_periods)
-       )
+   for key, values in series_by_key.items():
+       if result_scope == "product":
+           product_id, location_id, customer_id = key[0], None, None
+       else:
+           product_id, location_id, customer_id = key
+       period_ids = sorted(values)
+       series = [values[period_id] for period_id in period_ids]
+       series_anomalies = _find_spikes_and_drops(product_id, series, sigma_threshold)
+       series_anomalies.extend(_find_flatlines(product_id, series, flatline_min_periods))
+       for anomaly in series_anomalies:
+           anomaly.update({"location_id": location_id, "customer_id": customer_id})
+           if "period_index" in anomaly:
+               anomaly["period"] = _period_month(period_ids[anomaly["period_index"]])
+           elif "period_start" in anomaly:
+               start = anomaly["period_start"]
+               end = start + anomaly["period_count"] - 1
+               anomaly["period_start"] = _period_month(period_ids[start])
+               anomaly["period_end"] = _period_month(period_ids[end])
+       anomalies.extend(series_anomalies)
    return {
        "forecast_type": "STATISTICALFORECASTQTY",
+       "product_filter": product,
+       "location_filter": location,
+       "customer_filter": customer,
+         "result_scope": result_scope,
        "anomaly_count": len(anomalies),
        "anomalies": anomalies,
    }
@@ -184,13 +294,20 @@ def _find_spikes_and_drops(product_id: str, series: list, sigma_threshold: float
    deltas = [series[i] - series[i - 1] for i in range(1, len(series))]
    median_delta = statistics.median(deltas)
    abs_devs = [abs(d - median_delta) for d in deltas]
-   mad = statistics.median(abs_devs) or 1e-9
-   # 0.6745 scales MAD to be comparable to a standard deviation for normal data
+   mad = statistics.median(abs_devs)
+   if mad == 0:
+       delta_stddev = statistics.pstdev(deltas)
+       if delta_stddev == 0:
+           return []
+       scores = [abs(delta - median_delta) / delta_stddev for delta in deltas]
+   else:
+       # 0.6745 scales MAD to be comparable to a standard deviation for normal data
+       scores = [0.6745 * abs(delta - median_delta) / mad for delta in deltas]
    found = []
    for i, delta in enumerate(deltas):
-       robust_z = 0.6745 * abs(delta - median_delta) / mad
-       if robust_z > sigma_threshold:
-           pct_change = (delta / series[i]) * 100 if series[i] else 0
+       if scores[i] > sigma_threshold:
+           previous_value = series[i]
+           pct_change = (delta / previous_value) * 100 if previous_value else 0
            found.append(
                {
                    "product_id": product_id,
@@ -236,7 +353,12 @@ def _find_flatlines(product_id: str, series: list, min_periods: int) -> list:
 # ---------------------------------------------------------------------------
 _MOCK_LAST_LOADED_PERIOD = "2023-10"
 
-def get_sales_history_status(target_period: Optional[str] = None) -> dict:
+def get_sales_history_status(
+    target_period: Optional[str] = None,
+    product: str | None = None,
+    location: str | None = None,
+    customer: str | None = None,
+) -> dict:
    """
    Verify historical sales data (HISTSALES) is loaded through the target
    period. Mirrors Joule skill: getSalesHistory.
@@ -246,23 +368,35 @@ def get_sales_history_status(target_period: Optional[str] = None) -> dict:
    if USE_MOCK_DATA:
        last_loaded = _MOCK_LAST_LOADED_PERIOD
    else:
+       filters = [
+           f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+           f"PERIODID{IBP_PERIOD_LEVEL}_REL eq 0",
+       ]
+       if product:
+           filters.append(f"PRDID eq '{product}'")
+       if location:
+           filters.append(f"LOCID eq '{location}'")
+       if customer:
+           filters.append(f"CUSTID eq '{customer}'")
        result = _ibp_get(
            select=(
-               f"PRDID,LOCID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+               f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
                f"UOMTOID,HISTSALES"
            ),
-           filter_=(
-               f"UOMTOID eq '{IBP_UOM_TO_ID}' "
-               f"and PERIODID{IBP_PERIOD_LEVEL}_REL eq 0"
-           ),
+           filter_=" and ".join(filters),
        )
        rows = result.get("d", {}).get("results", [])
        period_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
-       last_loaded = rows[0][period_field][:7] if rows else None
+       last_loaded = _period_month(rows[0].get(period_field)) if rows else None
    ready = last_loaded is not None and last_loaded >= target_period
    return {
        "target_period": target_period,
+                 "product_filter": product,
+                 "location_filter": location,
+                 "customer_filter": customer,
        "last_loaded_period": last_loaded,
+          "period": last_loaded,
+         "period": last_loaded,
        "ready": ready,
    }
 

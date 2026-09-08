@@ -27,7 +27,12 @@ order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
 When a check reveals a problem (variance over threshold, anomalies found, \
 or missing sales data), offer to send an email notification via the \
-send_email tool, but only send it if the user confirms."""
+send_email tool, but only send it if the user confirms.
+When a tool returns multiple results, report the summary counts and list every
+item in alert_results in a compact markdown table with period, product, location,
+customer, forecast, actual, variance, and direction. Do not report only the
+total count. The tool payload contains alert_results only, not every evaluated
+row."""
 TOOL_REGISTRY = {
    "get_forecast_vs_consumption": get_forecast_vs_consumption,
    "detect_forecast_anomalies": detect_forecast_anomalies,
@@ -37,35 +42,47 @@ TOOL_REGISTRY = {
 TOOL_SCHEMAS = [
    {
        "name": "get_forecast_vs_consumption",
-    "description": "Compare statistical forecast vs actual consumption for optional product and location filters. Omit either filter to include all matching products or locations.",
+    "description": "Compare statistical forecast vs actual consumption. Use alert_direction='over' when the planner says above forecast, 'under' for below forecast, or 'both' for either direction. Use result_scope='product' for product totals or 'combination' for detail.",
        "input_schema": {
            "type": "object",
            "properties": {
                "location": {"type": "string", "description": "Location ID, e.g. '1010'"},
                "product": {"type": "string", "description": "Product ID, e.g. 'Product A'"},
+               "customer": {"type": "string", "description": "Customer ID, e.g. 'CUST-100'"},
                "threshold_pct": {"type": "number", "description": "Variance % threshold, default 20"},
+               "result_scope": {"type": "string", "enum": ["product", "combination"], "description": "Use product for aggregated product totals, combination for detailed product/location/customer results"},
+               "alert_direction": {"type": "string", "enum": ["over", "under", "both"], "description": "Use over for actual above forecast, under for actual below forecast, both for absolute variance"},
+               "period_start_rel": {"type": "integer", "description": "Relative period start; 0 is current, 1 is next period"},
+               "period_end_rel": {"type": "integer", "description": "Relative period end; use 3 with start 1 for the coming three periods"},
            },
            "required": [],
        },
    },
    {
        "name": "detect_forecast_anomalies",
-       "description": "Scan statistical forecast time series for spikes, drops, and flatlines across products.",
+         "description": "Scan statistical forecast time series for spikes, drops, and flatlines. Include the detected period. Use result_scope='product' to aggregate each product across locations and customers, or 'combination' for separate detail series.",
        "input_schema": {
            "type": "object",
            "properties": {
+               "product": {"type": "string", "description": "Optional product ID"},
+               "location": {"type": "string", "description": "Optional location ID"},
+               "customer": {"type": "string", "description": "Optional customer ID"},
                "sigma_threshold": {"type": "number", "description": "Anomaly threshold in standard deviations, default 3"},
                "flatline_min_periods": {"type": "integer", "description": "Minimum identical periods for a flatline, default 4"},
+               "result_scope": {"type": "string", "enum": ["product", "combination"], "description": "Product aggregates across locations and customers; combination keeps separate series"},
            },
        },
    },
    {
        "name": "get_sales_history_status",
-       "description": "Check whether historical sales data is fully loaded through the target period.",
+    "description": "Check historical sales readiness. Product, location, customer, and target period filters are optional.",
        "input_schema": {
            "type": "object",
            "properties": {
                "target_period": {"type": "string", "description": "YYYY-MM, optional -- defaults to current month"},
+               "product": {"type": "string", "description": "Optional product ID"},
+               "location": {"type": "string", "description": "Optional location ID"},
+               "customer": {"type": "string", "description": "Optional customer ID"},
            },
        },
    },
