@@ -17,14 +17,20 @@ from agent.tools import (
    detect_forecast_anomalies,
    get_forecast_vs_consumption,
    get_sales_history_status,
+    query_planning_data,
    send_email,
 )
 SYSTEM_PROMPT = """You are the IBP Demand Planning Agent. You help demand \
 planners validate data, monitor consumption variance, and detect forecast \
 anomalies in SAP Integrated Business Planning.
-You have four tools available. Decide which tool(s) to call and in what \
+You have five tools available. Decide which tool(s) to call and in what \
 order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
+Use query_planning_data for generic questions involving totals, rankings, \
+maximums, minimums, averages, comparisons, or base planning-level results. \
+For base planning level, group by product, location, customer, and period \
+unless the planner specifies a different grouping. Do not include UOM as a \
+query argument; the configured data-source UOM is used.
 When a check reveals a problem (variance over threshold, anomalies found, \
 or missing sales data), offer to send an email notification via the \
 send_email tool, but only send it if the user confirms.
@@ -37,6 +43,7 @@ TOOL_REGISTRY = {
    "get_forecast_vs_consumption": get_forecast_vs_consumption,
    "detect_forecast_anomalies": detect_forecast_anomalies,
    "get_sales_history_status": get_sales_history_status,
+    "query_planning_data": query_planning_data,
    "send_email": send_email,
 }
 TOOL_SCHEMAS = [
@@ -84,6 +91,27 @@ TOOL_SCHEMAS = [
                "location": {"type": "string", "description": "Optional location ID"},
                "customer": {"type": "string", "description": "Optional customer ID"},
            },
+       },
+   },
+   {
+       "name": "query_planning_data",
+       "description": "Run deterministic analytics over forecast and actual quantities. Use for generic questions such as highest, lowest, total, average, top N, comparisons, and base planning-level results. For base planning level use group_by product, location, customer, and period. Do not pass UOM; the configured data-source UOM is used.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "metric": {"type": "string", "enum": ["forecast", "actual", "variance_qty", "variance_pct"], "description": "Quantity or variance to analyze"},
+               "aggregation": {"type": "string", "enum": ["sum", "max", "min", "avg"], "description": "Aggregation to calculate"},
+               "group_by": {"type": "array", "items": {"type": "string", "enum": ["product", "location", "customer", "period"]}, "description": "Dimensions for grouping; use product for highest product forecast, or product/location/customer/period for base planning level"},
+               "location": {"type": "string", "description": "Optional location ID"},
+               "product": {"type": "string", "description": "Optional product ID"},
+               "customer": {"type": "string", "description": "Optional customer ID"},
+               "period_start_rel": {"type": "integer", "description": "Relative period start; 0 is current"},
+               "period_end_rel": {"type": "integer", "description": "Relative period end; 0 is current"},
+               "threshold_pct": {"type": "number", "description": "Optional absolute variance percentage threshold"},
+               "sort": {"type": "string", "enum": ["asc", "desc"]},
+               "limit": {"type": "integer", "description": "Number of results, from 1 to 100"},
+           },
+           "required": [],
        },
    },
    {

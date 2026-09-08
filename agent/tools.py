@@ -71,6 +71,172 @@ _MOCK_FORECAST_VS_CONSUMPTION = {
    ("1010", "Product A"): {"forecast": 10000, "actual": 13500},
 }
 
+def _forecast_consumption_rows(
+   location: str | None = None,
+   product: str | None = None,
+   customer: str | None = None,
+   period_start_rel: int = 0,
+   period_end_rel: int = 0,
+) -> list[dict]:
+   """Load forecast and actual rows for deterministic analytics."""
+   if period_start_rel > period_end_rel:
+       raise ValueError("period_start_rel must not exceed period_end_rel")
+   if USE_MOCK_DATA:
+       return [
+           {
+               "location": row_location,
+               "product": row_product,
+               "customer": None,
+               "period": None,
+               **values,
+           }
+           for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
+           if (location is None or row_location == location)
+           and (product is None or row_product == product)
+           and customer is None
+       ]
+
+   filters = [
+       f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+       f"PERIODID{IBP_PERIOD_LEVEL}_REL ge {period_start_rel}",
+       f"PERIODID{IBP_PERIOD_LEVEL}_REL le {period_end_rel}",
+   ]
+   if location:
+       filters.append(f"LOCID eq '{location}'")
+   if product:
+       filters.append(f"PRDID eq '{product}'")
+   if customer:
+       filters.append(f"CUSTID eq '{customer}'")
+   result = _ibp_get(
+       select=(
+           f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+           "UOMTOID,STATISTICALFORECASTQTY,ACTUALSQTY"
+       ),
+       filter_=" and ".join(filters),
+   )
+   return [
+       {
+           "location": row["LOCID"],
+           "product": row["PRDID"],
+           "customer": row.get("CUSTID"),
+           "period": _period_month(row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP")),
+           "forecast": float(row["STATISTICALFORECASTQTY"]),
+           "actual": float(row["ACTUALSQTY"]),
+       }
+       for row in result.get("d", {}).get("results", [])
+   ]
+
+def query_planning_data(
+   metric: str = "forecast",
+   aggregation: str = "sum",
+   group_by: list[str] | None = None,
+   location: str | None = None,
+   product: str | None = None,
+   customer: str | None = None,
+   period_start_rel: int = 0,
+   period_end_rel: int = 0,
+   threshold_pct: float | None = None,
+   sort: str = "desc",
+   limit: int = 10,
+) -> dict:
+   """Run validated, deterministic analytics over forecast/actual rows."""
+   allowed_metrics = {"forecast", "actual", "variance_qty", "variance_pct"}
+   allowed_aggregations = {"sum", "max", "min", "avg"}
+   allowed_dimensions = {"product", "location", "customer", "period"}
+   if metric not in allowed_metrics:
+       raise ValueError(f"metric must be one of {sorted(allowed_metrics)}")
+   if aggregation not in allowed_aggregations:
+       raise ValueError(f"aggregation must be one of {sorted(allowed_aggregations)}")
+   group_by = group_by or []
+   if any(dimension not in allowed_dimensions for dimension in group_by):
+       raise ValueError(f"group_by must contain only {sorted(allowed_dimensions)}")
+   if sort not in {"asc", "desc"}:
+       raise ValueError("sort must be 'asc' or 'desc'")
+   if not 1 <= limit <= 100:
+       raise ValueError("limit must be between 1 and 100")
+   rows = _forecast_consumption_rows(
+       location=location,
+       product=product,
+       customer=customer,
+       period_start_rel=period_start_rel,
+       period_end_rel=period_end_rel,
+   )
+   if threshold_pct is not None:
+       rows = [
+           row for row in rows
+           if row["forecast"]
+           and abs((row["actual"] - row["forecast"]) / row["forecast"] * 100)
+           > threshold_pct
+       ]
+
+   def value(row: dict) -> float:
+       if metric == "forecast":
+           return row["forecast"]
+       if metric == "actual":
+           return row["actual"]
+       variance = row["actual"] - row["forecast"]
+       if metric == "variance_qty":
+           return variance
+       return (variance / row["forecast"] * 100) if row["forecast"] else 0.0
+
+   groups: dict[tuple, list[float]] = {}
+   for row in rows:
+       key = tuple(row.get(dimension) for dimension in group_by)
+       groups.setdefault(key, []).append(value(row))
+   results = []
+   for key, values in groups.items():
+       if aggregation == "sum":
+           aggregate = sum(values)
+       elif aggregation == "max":
+           aggregate = max(values)
+       elif aggregation == "min":
+           aggregate = min(values)
+       else:
+           aggregate = sum(values) / len(values)
+       result = {dimension: key[index] for index, dimension in enumerate(group_by)}
+       if metric in {"variance_qty", "variance_pct"}:
+           grouped_rows = [
+               row for row in rows
+               if tuple(row.get(dimension) for dimension in group_by) == key
+           ]
+           forecast_total = sum(row["forecast"] for row in grouped_rows)
+           actual_total = sum(row["actual"] for row in grouped_rows)
+           result.update(
+               {
+                   "forecast": round(forecast_total, 2),
+                   "actual": round(actual_total, 2),
+                   "variance_qty": round(actual_total - forecast_total, 2),
+                   "variance_pct": round(
+                       (actual_total - forecast_total) / forecast_total * 100,
+                       2,
+                   )
+                   if forecast_total
+                   else 0.0,
+               }
+           )
+       else:
+           result[metric] = round(aggregate, 2)
+       results.append(result)
+   results.sort(
+       key=lambda result: result[metric],
+       reverse=sort == "desc",
+   )
+   return {
+       "metric": metric,
+       "aggregation": aggregation,
+       "group_by": group_by,
+       "filters": {
+           "location": location,
+           "product": product,
+           "customer": customer,
+           "period_start_rel": period_start_rel,
+           "period_end_rel": period_end_rel,
+           "threshold_pct": threshold_pct,
+       },
+       "total_rows_evaluated": len(rows),
+       "results": results[:limit],
+   }
+
 def get_forecast_vs_consumption(
    location: str | None = None,
    product: str | None = None,
