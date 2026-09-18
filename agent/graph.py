@@ -9,6 +9,7 @@ instead of hidden behind low-code configuration.
    START -> agent_node -> (tool call?) -> tool_node -> agent_node -> ... -> END
                        \-> (final answer) -----------------------------> END
 """
+import json
 from typing import Annotated, TypedDict
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -144,6 +145,7 @@ TOOL_SCHEMAS = [
 
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
+    insights: list[dict]
 
 def agent_node(state: AgentState) -> dict:
     client = get_llm_client()
@@ -160,6 +162,7 @@ def _message_content(message) -> list:
 def tool_node(state: AgentState) -> dict:
     last_message = state["messages"][-1]
     tool_results = []
+    insights = []
     for block in _message_content(last_message):
         if block.get("type") != "tool_use":
             continue
@@ -173,10 +176,14 @@ def tool_node(state: AgentState) -> dict:
                 "type": "tool_result",
                 "tool_use_id": block["id"],
                 "name": block["name"],
-                "content": str(result),
+                "content": json.dumps(result),
             }
         )
-    return {"messages": [{"role": "user", "content": tool_results}]}
+        insights.append({"tool": block["name"], "data": result})
+    return {
+        "messages": [{"role": "user", "content": tool_results}],
+        "insights": state.get("insights", []) + insights,
+    }
 
 def route_after_agent(state: AgentState) -> str:
     last_message = state["messages"][-1]
@@ -194,9 +201,19 @@ def build_graph():
     graph.add_edge("tool_node", "agent_node")
     return graph.compile()
 
-def run_agent(user_message: str) -> str:
+def run_agent_with_data(user_message: str, history: list[dict] | None = None) -> dict:
     app = build_graph()
-    final_state = app.invoke({"messages": [{"role": "user", "content": user_message}]})
+    messages = list(history or [])
+    messages.append({"role": "user", "content": user_message})
+    final_state = app.invoke({"messages": messages, "insights": []})
     last = final_state["messages"][-1]
     text_blocks = [b["text"] for b in _message_content(last) if b.get("type") == "text"]
-    return "\n".join(text_blocks) if text_blocks else str(last)
+    return {
+        "reply": "\n".join(text_blocks) if text_blocks else str(last),
+        "insights": final_state.get("insights", []),
+    }
+
+
+def run_agent(user_message: str) -> str:
+    """Keep the original string-returning interface for existing callers."""
+    return run_agent_with_data(user_message)["reply"]

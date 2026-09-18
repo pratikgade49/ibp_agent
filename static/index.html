@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IBP Demand Desk</title>
+  <style>
+    :root { --ink:#17324d; --muted:#6e8294; --paper:#f4f7f8; --panel:#fff; --line:#dbe4e9; --teal:#087f86; --coral:#df674d; --yellow:#f0b429; --violet:#7657e8; --shadow:0 12px 30px rgba(23,50,77,.08); }
+    * { box-sizing:border-box; } body { margin:0; color:var(--ink); background:var(--paper); font:15px/1.5 "Trebuchet MS", "Segoe UI", sans-serif; }
+    header { background:var(--ink); color:#fff; padding:24px clamp(20px,5vw,68px) 28px; display:flex; justify-content:space-between; align-items:end; gap:20px; }
+    header h1 { margin:0; font:700 clamp(26px,4vw,40px)/1.05 Georgia, serif; letter-spacing:0; } header p { margin:8px 0 0; color:#b7c8d3; }
+    .status { border:1px solid #56808f; border-radius:20px; padding:8px 13px; color:#d9f2ec; white-space:nowrap; font-size:12px; }
+    main { width:min(1440px, calc(100% - 40px)); margin:28px auto 64px; display:grid; gap:20px; padding-right:0; }
+    .query { background:#e0efec; padding:18px; border:1px solid #c4ded9; display:flex; gap:12px; align-items:center; box-shadow:var(--shadow); }
+    .chat { max-height:420px; overflow:auto; display:grid; gap:14px; padding-right:4px; }
+    .bubble { max-width:88%; padding:13px 16px; border:1px solid var(--line); white-space:pre-wrap; }
+    .bubble.user { justify-self:end; background:#e0efec; border-color:#c4ded9; }
+    .bubble.agent { justify-self:start; background:#fff; }
+    .bubble-label { display:block; color:var(--teal); font-size:10px; font-weight:bold; letter-spacing:1px; text-transform:uppercase; margin-bottom:4px; }
+    input { flex:1; min-width:0; border:1px solid #b8cbd0; padding:14px 16px; font:inherit; color:var(--ink); background:#fff; border-radius:4px; } button { border:0; background:var(--teal); color:#fff; padding:14px 20px; font-weight:700; cursor:pointer; border-radius:4px; } button:disabled { opacity:.6; cursor:wait; }
+    .suggestions { display:flex; gap:8px; flex-wrap:wrap; margin-top:-10px; } .suggestions button { background:#fff; color:var(--teal); border:1px solid #b7d9d3; padding:8px 11px; font-weight:400; }
+    .grid { display:grid; grid-template-columns:1.15fr .85fr; gap:20px; } .panel { background:var(--panel); border:1px solid var(--line); box-shadow:var(--shadow); padding:22px; min-width:0; }
+    .panel h2 { margin:0 0 14px; font:700 20px Georgia, serif; } .eyebrow { color:var(--teal); text-transform:uppercase; font-size:11px; font-weight:bold; letter-spacing:1.2px; }
+    #reply { white-space:pre-wrap; color:#385169; min-height:90px; } .empty { color:var(--muted); }
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; } .metric { border-left:4px solid var(--teal); padding:10px 13px; background:#f5faf9; } .metric strong { display:block; font:700 25px Georgia,serif; } .metric span { color:var(--muted); font-size:12px; }
+    .chart-wrap { overflow-x:auto; } svg { width:100%; min-width:460px; height:245px; display:block; } .axis { stroke:#d9e3e7; stroke-width:1; } .bar { fill:var(--teal); } .bar.alt { fill:var(--coral); } .label { fill:var(--muted); font-size:11px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; } th,td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-size:11px; text-transform:uppercase; } td:last-child { color:var(--coral); font-weight:bold; }
+    .wide { grid-column:1/-1; } .notice { padding:13px; background:#fff8df; border-left:4px solid var(--yellow); color:#705516; } .hidden { display:none; }
+    .workspace-actions { display:flex; gap:9px; align-items:center; } .icon-button { background:transparent; border:1px solid #56808f; padding:9px 12px; color:#fff; font-size:13px; } .icon-button:hover { background:#244761; }
+    .chat-drawer { position:fixed; z-index:10; top:14px; right:14px; bottom:14px; width:min(390px, calc(100vw - 28px)); background:#fff; border:1px solid #cdd4df; border-radius:26px; box-shadow:0 16px 50px rgba(23,50,77,.25); display:flex; flex-direction:column; overflow:hidden; transform:translateX(calc(100% + 30px)); transition:transform .25s ease; }
+    .chat-drawer.open { transform:translateX(0); } .chat-drawer-head { display:flex; align-items:center; gap:10px; padding:15px 14px; border-bottom:1px solid #e5e7ef; } .chat-drawer-head strong { flex:1; color:var(--violet); font-size:14px; } .drawer-icon { width:34px; height:34px; padding:0; border:1px solid var(--violet); background:#fff; color:var(--violet); border-radius:50%; font-size:17px; } .drawer-icon:hover { background:#f2efff; }
+    .chat-drawer .chat { flex:1; min-height:0; max-height:none; padding:22px 18px; background:linear-gradient(#fff 70%,#faf8ff); } .chat-drawer .bubble { max-width:100%; min-width:0; overflow-wrap:anywhere; font-size:14px; line-height:1.5; } .chat-drawer .bubble p { margin:0 0 10px; } .chat-drawer .bubble p:last-child { margin-bottom:0; } .chat-drawer .bubble ul { margin:5px 0 10px; padding-left:19px; } .chat-drawer .bubble li { margin:4px 0; } .chat-drawer .bubble strong { color:var(--violet); font-weight:700; } .chat-drawer-foot { padding:12px; border-top:1px solid #e5e7ef; background:#fff; } .drawer-compose { display:flex; gap:8px; align-items:center; border:2px solid #ad98ff; border-radius:24px; padding:3px 4px 3px 13px; } .drawer-compose input { border:0; outline:0; padding:8px 2px; } .drawer-compose button { flex:0 0 36px; width:36px; height:36px; padding:0; border-radius:50%; background:#d9d0ff; color:#fff; } .chat-drawer .suggestions { margin-top:10px; gap:8px; flex-wrap:wrap; } .chat-drawer .suggestions button { flex:1 1 auto; min-width:0; white-space:normal; text-align:center; }
+    .history-modal { position:fixed; z-index:20; inset:0; display:none; background:rgba(23,50,77,.28); align-items:flex-start; justify-content:flex-end; padding:76px 28px; } .history-modal.open { display:flex; } .history-box { width:min(360px,calc(100vw - 40px)); background:#fff; border:1px solid var(--line); box-shadow:var(--shadow); padding:20px; } .history-box h2 { margin:0 0 14px; font:700 20px Georgia,serif; } .history-item { display:block; width:100%; text-align:left; background:#f7f9fa; color:var(--ink); border:1px solid var(--line); margin-top:9px; padding:12px; font-weight:400; } .history-item small { display:block; color:var(--muted); margin-top:3px; }
+    @media (max-width:760px) { header { align-items:flex-start; flex-direction:column; } main { width:min(100% - 24px, 1320px); margin-top:14px; } .query { align-items:stretch; flex-direction:column; } .grid { grid-template-columns:1fr; } .wide { grid-column:auto; } .metrics { grid-template-columns:1fr; } .workspace-actions { width:100%; } }
+  </style>
+</head>
+<body>
+  <header><div><div class="eyebrow">SAP IBP / demand planning</div><h1>Demand Desk</h1><p>Forecast evidence, exceptions, and readiness in one workspace.</p></div><div class="workspace-actions"><button class="icon-button" id="history-button" type="button">☷ Chat history</button><div class="status" id="status">● Connected to agent</div><button class="icon-button" id="open-chat" type="button">Open agent</button></div></header>
+  <main>
+    <section><div class="eyebrow">Planning workspace</div><h2 style="margin:5px 0 0;font:700 28px Georgia,serif">Decision signals</h2><p style="margin:5px 0;color:var(--muted)">Use the agent for questions, then inspect the data it used here.</p></section>
+    <section class="grid">
+      <article class="panel"><div class="eyebrow">Signal summary</div><h2>At a glance</h2><div id="metrics" class="metrics"><div class="metric"><strong>--</strong><span>Waiting for analysis</span></div></div></article>
+      <article class="panel wide hidden" id="chart-panel"><div class="eyebrow">Comparison</div><h2 id="chart-title">Forecast and actual</h2><div class="chart-wrap" id="chart"></div></article>
+      <article class="panel wide hidden" id="alerts-panel"><div class="eyebrow">Attention required</div><h2>Alerts from the analysis</h2><div id="alerts"></div></article>
+    </section>
+  </main>
+  <aside class="chat-drawer open" id="chat-drawer" aria-label="Planning agent conversation"><div class="chat-drawer-head"><button class="drawer-icon" id="new-chat" type="button" title="New conversation">▯</button><strong>New Conversation</strong><button class="drawer-icon" id="history-drawer" type="button" title="Chat history">•••</button><button class="drawer-icon" id="close-chat" type="button" title="Close chat">×</button></div><div id="chat" class="chat"><div class="empty">Need a quick answer or a deeper dive?<br><br>Ask about your forecast, actual consumption, anomalies, or data readiness.</div></div><div class="chat-drawer-foot"><div class="drawer-compose"><input id="question" placeholder="Message planning agent..."><button id="ask" title="Send">➤</button></div><div class="suggestions"><button data-q="Which products have the highest forecast?">Highest forecast</button><button data-q="Show forecast anomalies">Anomalies</button><button data-q="Is sales history ready?">Data readiness</button></div></div></aside>
+  <div class="history-modal" id="history-modal"><section class="history-box"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Recent chats</h2><button class="drawer-icon" id="close-history" type="button">×</button></div><div id="history-list"></div></section></div>
+  <script>
+    const $ = id => document.getElementById(id);
+    let conversationId = localStorage.getItem('ibp-conversation-id');
+    const transcript = JSON.parse(localStorage.getItem('ibp-transcript') || '[]');
+    const format = value => { if (value === null || value === undefined || value === '--' || typeof value === 'string' && isNaN(Number(value))) return value === null || value === undefined ? 'N/A' : value; return Number(value).toLocaleString(undefined, {maximumFractionDigits:1}); };
+    function metric(label, value, tone='teal') { return `<div class="metric" style="border-color:var(--${tone})"><strong>${format(value)}</strong><span>${label}</span></div>`; }
+    function renderBars(rows) {
+      const width=760, height=245, left=42, bottom=38, top=18, plotH=height-top-bottom;
+      const max=Math.max(...rows.flatMap(r => [Number(r.forecast||0), Number(r.actual||0)]), 1), groupW=(width-left-10)/rows.length;
+      let svg=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Forecast and actual comparison"><line class="axis" x1="${left}" y1="${top}" x2="${left}" y2="${height-bottom}"/>`;
+      rows.forEach((r,i) => { const x=left+i*groupW+groupW*.18, base=height-bottom, bw=Math.max(12,groupW*.22), fh=Number(r.forecast||0)/max*plotH, ah=Number(r.actual||0)/max*plotH; svg+=`<rect class="bar" x="${x}" y="${base-fh}" width="${bw}" height="${fh}"/><rect class="bar alt" x="${x+bw+5}" y="${base-ah}" width="${bw}" height="${ah}"/><text class="label" x="${x}" y="${height-15}">${String(r.product||r.period||'').slice(0,12)}</text>`; });
+      return svg+`<text class="label" x="${width-175}" y="18">■ forecast　<tspan fill="var(--coral)">■ actual</tspan></text></svg>`;
+    }
+    function findData(insights) { return [...insights].reverse().find(item => item.data && (item.data.results || item.data.alert_results || item.data.anomalies || item.data.ready !== undefined)); }
+    function escapeHtml(text) { return String(text || '').replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character])); }
+    function renderMarkdown(text) {
+      const escaped=escapeHtml(text || 'The agent returned no text.');
+      return escaped.split(/\n\s*\n/).map(block => {
+        let html=block.replace(/^###\s+(.+)$/gm,'<strong>$1</strong>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>');
+        const lines=html.split('\n');
+        if (lines.every(line => /^\s*[-*]\s+/.test(line))) return `<ul>${lines.map(line=>`<li>${line.replace(/^\s*[-*]\s+/,'')}</li>`).join('')}</ul>`;
+        return `<p>${html.replace(/\n/g,'<br>')}</p>`;
+      }).join('');
+    }
+    function varianceDisplay(row) {
+      if (row.variance_status === 'not-calculable-zero-forecast') return 'N/A (zero forecast)';
+      return row.variance_pct ?? row.type ?? 'N/A';
+    }
+    function appendMessage(role, text, persist=true) {
+      const empty=$('chat').querySelector('.empty'); if (empty) empty.remove();
+      const bubble=document.createElement('div'); bubble.className=`bubble ${role}`;
+      bubble.innerHTML=`<span class="bubble-label">${role === 'user' ? 'You' : 'Planning agent'}</span>`;
+      if (role === 'agent') bubble.insertAdjacentHTML('beforeend',renderMarkdown(text));
+      else bubble.appendChild(document.createTextNode(text || 'The agent returned no text.'));
+      $('chat').appendChild(bubble); $('chat').scrollTop=$('chat').scrollHeight;
+      if (persist) { transcript.push({role,text:text || 'The agent returned no text.'}); localStorage.setItem('ibp-transcript',JSON.stringify(transcript)); }
+    }
+    function saveCurrentChat() {
+      if (!conversationId || !transcript.length) return;
+      const chats=JSON.parse(localStorage.getItem('ibp-recent-chats') || '[]');
+      const existing=chats.findIndex(chat=>chat.id === conversationId);
+      const record={id:conversationId,title:transcript.find(item=>item.role==='user')?.text || 'Planning conversation',updatedAt:new Date().toLocaleString(),messages:[...transcript]};
+      if (existing >= 0) chats.splice(existing,1); chats.unshift(record); localStorage.setItem('ibp-recent-chats',JSON.stringify(chats.slice(0,8)));
+    }
+    function renderHistory() {
+      const chats=JSON.parse(localStorage.getItem('ibp-recent-chats') || '[]');
+      $('history-list').innerHTML=chats.length ? chats.map(chat=>`<button class="history-item" data-chat-id="${chat.id}">${chat.title.slice(0,58)}<small>${chat.updatedAt}</small></button>`).join('') : '<p class="empty">No recent conversations yet.</p>';
+      document.querySelectorAll('[data-chat-id]').forEach(button=>button.addEventListener('click',()=>{ const chat=chats.find(item=>item.id===button.dataset.chatId); if (!chat) return; conversationId=chat.id; transcript.length=0; transcript.push(...chat.messages); localStorage.setItem('ibp-conversation-id',conversationId); localStorage.setItem('ibp-transcript',JSON.stringify(transcript)); $('chat').innerHTML=''; transcript.forEach(item=>appendMessage(item.role,item.text,false)); $('history-modal').classList.remove('open'); $('chat-drawer').classList.add('open'); }));
+    }
+    function render(result, question) {
+      appendMessage('user', question); appendMessage('agent', result.reply);
+      conversationId=result.conversation_id; localStorage.setItem('ibp-conversation-id',conversationId);
+      const insight=findData(result.insights || []), data=insight && insight.data;
+      if (!data) { $('metrics').innerHTML=metric('No structured evidence returned','--'); return; }
+      $('metrics').innerHTML='';
+      if (data.results) { const rows=data.results; const values=rows.map(r=>Number(r[data.metric] ?? r.actual ?? 0)); $('metrics').innerHTML=metric('Rows evaluated',data.total_rows_evaluated)+metric('Top value',Math.max(...values,0))+metric('Results shown',rows.length); if(rows.length){ $('chart-panel').classList.remove('hidden'); $('chart-title').textContent=`${data.metric} by ${data.group_by?.join(' / ') || 'result'}`; $('chart').innerHTML=renderBars(rows.map(r=>({product:r.product||r.period,forecast:r.forecast||r[data.metric],actual:r.actual||0}))); } }
+      else if (data.alert_results) { $('metrics').innerHTML=metric('Rows checked',data.count)+metric('Alerts',data.alert_count,'coral')+metric('Threshold',`${data.threshold_pct}%`); renderAlerts(data.alert_results); }
+      else if (data.anomalies) { $('metrics').innerHTML=metric('Anomalies found',data.anomaly_count,data.anomaly_count?'coral':'teal')+metric('Scope',data.result_scope); renderAlerts(data.anomalies.map(a=>({product:a.product_id,type:a.type,period:a.period||a.period_start||'-',variance_pct:a.pct_change||a.value||'-'}))); }
+      else if (data.ready !== undefined) { $('metrics').innerHTML=metric('Ready',data.ready?'YES':'NO',data.ready?'teal':'coral')+metric('Last loaded',data.last_loaded_period||'-')+metric('Missing periods',data.missing_periods?.length||0,'coral'); }
+    }
+    function renderAlerts(rows) { $('alerts-panel').classList.remove('hidden'); $('alerts').innerHTML=`<table><thead><tr><th>Product</th><th>Period</th><th>Forecast</th><th>Actual</th><th>Variance / type</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${r.product||r.product_id||'-'}</td><td>${r.period||'-'}</td><td>${format(r.forecast)}</td><td>${format(r.actual)}</td><td>${varianceDisplay(r)}</td></tr>`).join('')}</tbody></table>`; }
+    async function ask() { const question=$('question').value.trim(); if(!question) return; const button=$('ask'); button.disabled=true; $('status').textContent='● Running analysis'; try { const response=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:question,conversation_id:conversationId})}); if(!response.ok) throw new Error(await response.text()); render(await response.json(),question); $('question').value=''; $('status').textContent='● Connected to agent'; } catch(error) { appendMessage('agent',`Could not complete the analysis: ${error.message}`); $('status').textContent='● Agent unavailable'; } finally { button.disabled=false; } }
+    function newChat() { saveCurrentChat(); conversationId=null; transcript.length=0; localStorage.removeItem('ibp-conversation-id'); localStorage.removeItem('ibp-transcript'); $('chat').innerHTML='<div class="empty">Need a quick answer or a deeper dive?<br><br>Ask about your forecast, actual consumption, anomalies, or data readiness.</div>'; $('metrics').innerHTML=metric('Waiting for analysis','--'); $('chart-panel').classList.add('hidden'); $('alerts-panel').classList.add('hidden'); $('question').focus(); }
+    $('ask').addEventListener('click',ask); $('new-chat').addEventListener('click',newChat); $('open-chat').addEventListener('click',()=>$('chat-drawer').classList.add('open')); $('close-chat').addEventListener('click',()=>$('chat-drawer').classList.remove('open')); $('history-button').addEventListener('click',()=>{renderHistory();$('history-modal').classList.add('open')}); $('history-drawer').addEventListener('click',()=>{renderHistory();$('history-modal').classList.add('open')}); $('close-history').addEventListener('click',()=>$('history-modal').classList.remove('open')); $('history-modal').addEventListener('click',event=>{if(event.target.id==='history-modal')$('history-modal').classList.remove('open')}); $('question').addEventListener('keydown',event=>{if(event.key==='Enter')ask()}); document.querySelectorAll('[data-q]').forEach(button=>button.addEventListener('click',()=>{$('question').value=button.dataset.q;ask()}));
+    window.addEventListener('beforeunload',saveCurrentChat);
+    transcript.forEach(item=>appendMessage(item.role,item.text,false));
+  </script>
+</body>
+</html>

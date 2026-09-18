@@ -239,7 +239,7 @@ def query_planning_data(
                         2,
                     )
                     if forecast_total
-                    else 0.0,
+                    else None,
                 }
             )
         else:
@@ -343,7 +343,7 @@ def get_forecast_vs_consumption(
         rows = list(grouped.values())
     for row in rows:
         forecast, actual = row["forecast"], row["actual"]
-        variance_pct = ((actual - forecast) / forecast) * 100 if forecast else 0.0
+        variance_pct = ((actual - forecast) / forecast) * 100 if forecast else None
         direction = "over-consumption" if actual > forecast else "under-consumption"
         direction_matches = (
             alert_direction == "both"
@@ -353,9 +353,20 @@ def get_forecast_vs_consumption(
         analyses.append(
             {
                 **row,
-                "variance_pct": round(variance_pct, 1),
-                "alert": direction_matches and abs(variance_pct) > threshold_pct,
+                "variance_pct": round(variance_pct, 1) if variance_pct is not None else None,
+                "alert": (
+                    direction_matches
+                    and (
+                        (variance_pct is not None and abs(variance_pct) > threshold_pct)
+                        or (forecast == 0 and actual != 0)
+                    )
+                ),
                 "direction": direction,
+                "variance_status": (
+                    "not-calculable-zero-forecast"
+                    if forecast == 0
+                    else "calculated"
+                ),
             }
         )
     response = {
@@ -372,7 +383,7 @@ def get_forecast_vs_consumption(
         "alert_results": [
             {
                 key: item[key]
-                for key in ("product", "location", "customer", "period", "forecast", "actual", "variance_pct", "direction")
+                for key in ("product", "location", "customer", "period", "forecast", "actual", "variance_pct", "variance_status", "direction")
                 if key in item
             }
             for item in analyses
