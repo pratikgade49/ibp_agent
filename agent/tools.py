@@ -37,32 +37,60 @@ PLANNING_DATA_PATH = (
 )
 
 def _period_month(period_id) -> str | None:
-   """Convert SAP OData date values to a YYYY-MM display value."""
-   if not period_id:
-       return None
-   if isinstance(period_id, str):
-       match = re.search(r"/Date\((\d+)", period_id)
-       if match:
-           return datetime.utcfromtimestamp(int(match.group(1)) / 1000).strftime("%Y-%m")
-       if len(period_id) >= 7 and period_id[4] == "-":
-           return period_id[:7]
-   return None
+    """Convert SAP OData date values to a YYYY-MM display value."""
+    if not period_id:
+        return None
+    if isinstance(period_id, str):
+        match = re.search(r"/Date\((\d+)", period_id)
+        if match:
+            return datetime.utcfromtimestamp(int(match.group(1)) / 1000).strftime("%Y-%m")
+        if len(period_id) >= 7 and period_id[4] == "-":
+            return period_id[:7]
+    return None
+
+def _months_between(start_period: str, end_period: str) -> list[str]:
+    """Return inclusive YYYY-MM periods between two valid month values."""
+    start = datetime.strptime(start_period, "%Y-%m")
+    end = datetime.strptime(end_period, "%Y-%m")
+    periods = []
+    current = start
+    while current <= end:
+        periods.append(current.strftime("%Y-%m"))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    return periods
+
+def _display_id(value: str | None) -> str | None:
+    """Extract an ID from a planning-table value such as 'ID - Description'."""
+    return value.split(" - ", 1)[0].strip() if value else None
+
+def _product_id_candidates(product: str | None) -> list[str | None]:
+    product_id = _display_id(product)
+    if not product_id:
+        return [None]
+    candidates = [product_id]
+    alternate = product_id.replace("-", "_") if "-" in product_id else product_id.replace("_", "-")
+    if alternate != product_id:
+        candidates.append(alternate)
+    return candidates
 
 def _ibp_get(select: str, filter_: str) -> dict:
-   """Shared GET against the IBP PlanningData OData collection."""
-   if "UOMTOID" in select and "UOMTOID" not in filter_:
-         filter_ = f"({filter_}) and UOMTOID eq '{IBP_UOM_TO_ID}'"
-   url = f"{IBP_BASE_URL}{PLANNING_DATA_PATH}"
-   params = {"$select": select, "$filter": filter_, "$format": "json"}
-   resp = requests.get(
-       url, params=params, auth=(IBP_USER, IBP_PASSWORD), timeout=30
-   )
-   if not resp.ok:
-       raise RuntimeError(
-           f"SAP IBP request failed with HTTP {resp.status_code}; "
-           f"select={select}; filter={filter_}; response={resp.text}"
-       )
-   return resp.json()
+    """Shared GET against the IBP PlanningData OData collection."""
+    if "UOMTOID" in select and "UOMTOID" not in filter_:
+            filter_ = f"({filter_}) and UOMTOID eq '{IBP_UOM_TO_ID}'"
+    url = f"{IBP_BASE_URL}{PLANNING_DATA_PATH}"
+    params = {"$select": select, "$filter": filter_, "$format": "json"}
+    resp = requests.get(
+        url, params=params, auth=(IBP_USER, IBP_PASSWORD), timeout=30
+    )
+    if not resp.ok:
+        raise RuntimeError(
+            f"SAP IBP request failed with HTTP {resp.status_code}; "
+            f"select={select}; filter={filter_}; response={resp.text}"
+        )
+    return resp.json()
 
 # ---------------------------------------------------------------------------
 # 1. Forecast vs. Consumption Alert
@@ -72,288 +100,288 @@ _MOCK_FORECAST_VS_CONSUMPTION = {
 }
 
 def _forecast_consumption_rows(
-   location: str | None = None,
-   product: str | None = None,
-   customer: str | None = None,
-   period_start_rel: int = 0,
-   period_end_rel: int = 0,
-) -> list[dict]:
-   """Load forecast and actual rows for deterministic analytics."""
-   if period_start_rel > period_end_rel:
-       raise ValueError("period_start_rel must not exceed period_end_rel")
-   if USE_MOCK_DATA:
-       return [
-           {
-               "location": row_location,
-               "product": row_product,
-               "customer": None,
-               "period": None,
-               **values,
-           }
-           for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
-           if (location is None or row_location == location)
-           and (product is None or row_product == product)
-           and customer is None
-       ]
-
-   filters = [
-       f"UOMTOID eq '{IBP_UOM_TO_ID}'",
-       f"PERIODID{IBP_PERIOD_LEVEL}_REL ge {period_start_rel}",
-       f"PERIODID{IBP_PERIOD_LEVEL}_REL le {period_end_rel}",
-   ]
-   if location:
-       filters.append(f"LOCID eq '{location}'")
-   if product:
-       filters.append(f"PRDID eq '{product}'")
-   if customer:
-       filters.append(f"CUSTID eq '{customer}'")
-   result = _ibp_get(
-       select=(
-           f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
-           "UOMTOID,STATISTICALFORECASTQTY,ACTUALSQTY"
-       ),
-       filter_=" and ".join(filters),
-   )
-   return [
-       {
-           "location": row["LOCID"],
-           "product": row["PRDID"],
-           "customer": row.get("CUSTID"),
-           "period": _period_month(row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP")),
-           "forecast": float(row["STATISTICALFORECASTQTY"]),
-           "actual": float(row["ACTUALSQTY"]),
-       }
-       for row in result.get("d", {}).get("results", [])
-   ]
-
-def query_planning_data(
-   metric: str = "forecast",
-   aggregation: str = "sum",
-   group_by: list[str] | None = None,
-   location: str | None = None,
-   product: str | None = None,
-   customer: str | None = None,
-   period_start_rel: int = 0,
-   period_end_rel: int = 0,
-   threshold_pct: float | None = None,
-   sort: str = "desc",
-   limit: int = 10,
-) -> dict:
-   """Run validated, deterministic analytics over forecast/actual rows."""
-   allowed_metrics = {"forecast", "actual", "variance_qty", "variance_pct"}
-   allowed_aggregations = {"sum", "max", "min", "avg"}
-   allowed_dimensions = {"product", "location", "customer", "period"}
-   if metric not in allowed_metrics:
-       raise ValueError(f"metric must be one of {sorted(allowed_metrics)}")
-   if aggregation not in allowed_aggregations:
-       raise ValueError(f"aggregation must be one of {sorted(allowed_aggregations)}")
-   group_by = group_by or []
-   if any(dimension not in allowed_dimensions for dimension in group_by):
-       raise ValueError(f"group_by must contain only {sorted(allowed_dimensions)}")
-   if sort not in {"asc", "desc"}:
-       raise ValueError("sort must be 'asc' or 'desc'")
-   if not 1 <= limit <= 100:
-       raise ValueError("limit must be between 1 and 100")
-   rows = _forecast_consumption_rows(
-       location=location,
-       product=product,
-       customer=customer,
-       period_start_rel=period_start_rel,
-       period_end_rel=period_end_rel,
-   )
-   if threshold_pct is not None:
-       rows = [
-           row for row in rows
-           if row["forecast"]
-           and abs((row["actual"] - row["forecast"]) / row["forecast"] * 100)
-           > threshold_pct
-       ]
-
-   def value(row: dict) -> float:
-       if metric == "forecast":
-           return row["forecast"]
-       if metric == "actual":
-           return row["actual"]
-       variance = row["actual"] - row["forecast"]
-       if metric == "variance_qty":
-           return variance
-       return (variance / row["forecast"] * 100) if row["forecast"] else 0.0
-
-   groups: dict[tuple, list[float]] = {}
-   for row in rows:
-       key = tuple(row.get(dimension) for dimension in group_by)
-       groups.setdefault(key, []).append(value(row))
-   results = []
-   for key, values in groups.items():
-       if aggregation == "sum":
-           aggregate = sum(values)
-       elif aggregation == "max":
-           aggregate = max(values)
-       elif aggregation == "min":
-           aggregate = min(values)
-       else:
-           aggregate = sum(values) / len(values)
-       result = {dimension: key[index] for index, dimension in enumerate(group_by)}
-       if metric in {"variance_qty", "variance_pct"}:
-           grouped_rows = [
-               row for row in rows
-               if tuple(row.get(dimension) for dimension in group_by) == key
-           ]
-           forecast_total = sum(row["forecast"] for row in grouped_rows)
-           actual_total = sum(row["actual"] for row in grouped_rows)
-           result.update(
-               {
-                   "forecast": round(forecast_total, 2),
-                   "actual": round(actual_total, 2),
-                   "variance_qty": round(actual_total - forecast_total, 2),
-                   "variance_pct": round(
-                       (actual_total - forecast_total) / forecast_total * 100,
-                       2,
-                   )
-                   if forecast_total
-                   else 0.0,
-               }
-           )
-       else:
-           result[metric] = round(aggregate, 2)
-       results.append(result)
-   results.sort(
-       key=lambda result: result[metric],
-       reverse=sort == "desc",
-   )
-   return {
-       "metric": metric,
-       "aggregation": aggregation,
-       "group_by": group_by,
-       "filters": {
-           "location": location,
-           "product": product,
-           "customer": customer,
-           "period_start_rel": period_start_rel,
-           "period_end_rel": period_end_rel,
-           "threshold_pct": threshold_pct,
-       },
-       "total_rows_evaluated": len(rows),
-       "results": results[:limit],
-   }
-
-def get_forecast_vs_consumption(
-   location: str | None = None,
-   product: str | None = None,
+    location: str | None = None,
+    product: str | None = None,
     customer: str | None = None,
-   threshold_pct: float = 20.0,
-    result_scope: str = "combination",
-    alert_direction: str = "both",
     period_start_rel: int = 0,
     period_end_rel: int = 0,
-) -> dict:
-   """
-   Compare statistical forecast vs actual consumption. Location, product, and
-   customer are optional. Use result_scope="product" for product totals or
-   result_scope="combination" for product/location/customer detail.
-   """
-   if result_scope not in {"product", "combination"}:
-       raise ValueError("result_scope must be 'product' or 'combination'")
-   if alert_direction not in {"over", "under", "both"}:
-       raise ValueError("alert_direction must be 'over', 'under', or 'both'")
-   if period_start_rel > period_end_rel:
-       raise ValueError("period_start_rel must not exceed period_end_rel")
-   analyses = []
-   if USE_MOCK_DATA:
-       rows = [
-           {"location": row_location, "product": row_product, **values}
-           for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
-           if (location is None or row_location == location)
-           and (product is None or row_product == product)
-           and customer is None
-       ]
-   else:
-       filters = [
-           f"UOMTOID eq '{IBP_UOM_TO_ID}'",
-           f"PERIODID{IBP_PERIOD_LEVEL}_REL ge {period_start_rel}",
-           f"PERIODID{IBP_PERIOD_LEVEL}_REL le {period_end_rel}",
-       ]
-       if location:
-           filters.append(f"LOCID eq '{location}'")
-       if product:
-           filters.append(f"PRDID eq '{product}'")
-       if customer:
-           filters.append(f"CUSTID eq '{customer}'")
-       result = _ibp_get(
-           select=(
-               f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
-               "UOMTOID,STATISTICALFORECASTQTY,ACTUALSQTY"
-           ),
-           filter_=" and ".join(filters),
-       )
-       rows = [
-           {
-               "location": row["LOCID"],
-               "product": row["PRDID"],
-               "customer": row.get("CUSTID"),
-               "period": _period_month(row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP")),
-               "forecast": float(row["STATISTICALFORECASTQTY"]),
-               "actual": float(row["ACTUALSQTY"]),
-           }
-           for row in result.get("d", {}).get("results", [])
-       ]
-   if result_scope == "product":
-       grouped = {}
-       for row in rows:
-           group_key = (row["product"], row.get("period"))
-           grouped.setdefault(
-               group_key,
-               {
-                   "product": row["product"],
-                   "period": row.get("period"),
-                   "forecast": 0.0,
-                   "actual": 0.0,
-               },
-           )
-           grouped[group_key]["forecast"] += row["forecast"]
-           grouped[group_key]["actual"] += row["actual"]
-       rows = list(grouped.values())
-   for row in rows:
-       forecast, actual = row["forecast"], row["actual"]
-       variance_pct = ((actual - forecast) / forecast) * 100 if forecast else 0.0
-       direction = "over-consumption" if actual > forecast else "under-consumption"
-       direction_matches = (
-           alert_direction == "both"
-           or (alert_direction == "over" and direction == "over-consumption")
-           or (alert_direction == "under" and direction == "under-consumption")
-       )
-       analyses.append(
-           {
-               **row,
-               "variance_pct": round(variance_pct, 1),
-               "alert": direction_matches and abs(variance_pct) > threshold_pct,
-               "direction": direction,
-           }
-       )
-   response = {
-       "location_filter": location,
-       "product_filter": product,
-       "customer_filter": customer,
-       "result_scope": result_scope,
-       "threshold_pct": threshold_pct,
-         "alert_direction": alert_direction,
-         "period_start_rel": period_start_rel,
-         "period_end_rel": period_end_rel,
-       "count": len(analyses),
-       "alert_count": sum(item["alert"] for item in analyses),
-       "alert_results": [
-           {
-               key: item[key]
-               for key in ("product", "location", "customer", "period", "forecast", "actual", "variance_pct", "direction")
-               if key in item
-           }
-           for item in analyses
-           if item["alert"]
-       ],
-   }
-   if len(analyses) == 1:
-       response.update(analyses[0])
-   return response
+    ) -> list[dict]:
+    """Load forecast and actual rows for deterministic analytics."""
+    if period_start_rel > period_end_rel:
+        raise ValueError("period_start_rel must not exceed period_end_rel")
+    if USE_MOCK_DATA:
+        return [
+            {
+                "location": row_location,
+                "product": row_product,
+                "customer": None,
+                "period": None,
+                **values,
+            }
+            for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
+            if (location is None or row_location == location)
+            and (product is None or row_product == product)
+            and customer is None
+        ]
+
+    filters = [
+        f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+        f"PERIODID{IBP_PERIOD_LEVEL}_REL ge {period_start_rel}",
+        f"PERIODID{IBP_PERIOD_LEVEL}_REL le {period_end_rel}",
+    ]
+    if location:
+        filters.append(f"LOCID eq '{location}'")
+    if product:
+        filters.append(f"PRDID eq '{product}'")
+    if customer:
+        filters.append(f"CUSTID eq '{customer}'")
+    result = _ibp_get(
+        select=(
+            f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+            "UOMTOID,STATISTICALFORECASTQTY,ACTUALSQTY"
+        ),
+        filter_=" and ".join(filters),
+    )
+    return [
+        {
+            "location": row["LOCID"],
+            "product": row["PRDID"],
+            "customer": row.get("CUSTID"),
+            "period": _period_month(row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP")),
+            "forecast": float(row["STATISTICALFORECASTQTY"]),
+            "actual": float(row["ACTUALSQTY"]),
+        }
+        for row in result.get("d", {}).get("results", [])
+    ]
+
+def query_planning_data(
+    metric: str = "forecast",
+    aggregation: str = "sum",
+    group_by: list[str] | None = None,
+    location: str | None = None,
+    product: str | None = None,
+    customer: str | None = None,
+    period_start_rel: int = 0,
+    period_end_rel: int = 0,
+    threshold_pct: float | None = None,
+    sort: str = "desc",
+    limit: int = 10,
+    ) -> dict:
+    """Run validated, deterministic analytics over forecast/actual rows."""
+    allowed_metrics = {"forecast", "actual", "variance_qty", "variance_pct"}
+    allowed_aggregations = {"sum", "max", "min", "avg"}
+    allowed_dimensions = {"product", "location", "customer", "period"}
+    if metric not in allowed_metrics:
+        raise ValueError(f"metric must be one of {sorted(allowed_metrics)}")
+    if aggregation not in allowed_aggregations:
+        raise ValueError(f"aggregation must be one of {sorted(allowed_aggregations)}")
+    group_by = group_by or []
+    if any(dimension not in allowed_dimensions for dimension in group_by):
+        raise ValueError(f"group_by must contain only {sorted(allowed_dimensions)}")
+    if sort not in {"asc", "desc"}:
+        raise ValueError("sort must be 'asc' or 'desc'")
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    rows = _forecast_consumption_rows(
+        location=location,
+        product=product,
+        customer=customer,
+        period_start_rel=period_start_rel,
+        period_end_rel=period_end_rel,
+    )
+    if threshold_pct is not None:
+        rows = [
+            row for row in rows
+            if row["forecast"]
+            and abs((row["actual"] - row["forecast"]) / row["forecast"] * 100)
+            > threshold_pct
+        ]
+
+    def value(row: dict) -> float:
+        if metric == "forecast":
+            return row["forecast"]
+        if metric == "actual":
+            return row["actual"]
+        variance = row["actual"] - row["forecast"]
+        if metric == "variance_qty":
+            return variance
+        return (variance / row["forecast"] * 100) if row["forecast"] else 0.0
+
+    groups: dict[tuple, list[float]] = {}
+    for row in rows:
+        key = tuple(row.get(dimension) for dimension in group_by)
+        groups.setdefault(key, []).append(value(row))
+    results = []
+    for key, values in groups.items():
+        if aggregation == "sum":
+            aggregate = sum(values)
+        elif aggregation == "max":
+            aggregate = max(values)
+        elif aggregation == "min":
+            aggregate = min(values)
+        else:
+            aggregate = sum(values) / len(values)
+        result = {dimension: key[index] for index, dimension in enumerate(group_by)}
+        if metric in {"variance_qty", "variance_pct"}:
+            grouped_rows = [
+                row for row in rows
+                if tuple(row.get(dimension) for dimension in group_by) == key
+            ]
+            forecast_total = sum(row["forecast"] for row in grouped_rows)
+            actual_total = sum(row["actual"] for row in grouped_rows)
+            result.update(
+                {
+                    "forecast": round(forecast_total, 2),
+                    "actual": round(actual_total, 2),
+                    "variance_qty": round(actual_total - forecast_total, 2),
+                    "variance_pct": round(
+                        (actual_total - forecast_total) / forecast_total * 100,
+                        2,
+                    )
+                    if forecast_total
+                    else 0.0,
+                }
+            )
+        else:
+            result[metric] = round(aggregate, 2)
+        results.append(result)
+    results.sort(
+        key=lambda result: result[metric],
+        reverse=sort == "desc",
+    )
+    return {
+        "metric": metric,
+        "aggregation": aggregation,
+        "group_by": group_by,
+        "filters": {
+            "location": location,
+            "product": product,
+            "customer": customer,
+            "period_start_rel": period_start_rel,
+            "period_end_rel": period_end_rel,
+            "threshold_pct": threshold_pct,
+        },
+        "total_rows_evaluated": len(rows),
+        "results": results[:limit],
+    }
+
+def get_forecast_vs_consumption(
+    location: str | None = None,
+    product: str | None = None,
+        customer: str | None = None,
+    threshold_pct: float = 20.0,
+        result_scope: str = "combination",
+        alert_direction: str = "both",
+        period_start_rel: int = 0,
+        period_end_rel: int = 0,
+    ) -> dict:
+    """
+    Compare statistical forecast vs actual consumption. Location, product, and
+    customer are optional. Use result_scope="product" for product totals or
+    result_scope="combination" for product/location/customer detail.
+    """
+    if result_scope not in {"product", "combination"}:
+        raise ValueError("result_scope must be 'product' or 'combination'")
+    if alert_direction not in {"over", "under", "both"}:
+        raise ValueError("alert_direction must be 'over', 'under', or 'both'")
+    if period_start_rel > period_end_rel:
+        raise ValueError("period_start_rel must not exceed period_end_rel")
+    analyses = []
+    if USE_MOCK_DATA:
+        rows = [
+            {"location": row_location, "product": row_product, **values}
+            for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
+            if (location is None or row_location == location)
+            and (product is None or row_product == product)
+            and customer is None
+        ]
+    else:
+        filters = [
+            f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+            f"PERIODID{IBP_PERIOD_LEVEL}_REL ge {period_start_rel}",
+            f"PERIODID{IBP_PERIOD_LEVEL}_REL le {period_end_rel}",
+        ]
+        if location:
+            filters.append(f"LOCID eq '{location}'")
+        if product:
+            filters.append(f"PRDID eq '{product}'")
+        if customer:
+            filters.append(f"CUSTID eq '{customer}'")
+        result = _ibp_get(
+            select=(
+                f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+                "UOMTOID,STATISTICALFORECASTQTY,ACTUALSQTY"
+            ),
+            filter_=" and ".join(filters),
+        )
+        rows = [
+            {
+                "location": row["LOCID"],
+                "product": row["PRDID"],
+                "customer": row.get("CUSTID"),
+                "period": _period_month(row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP")),
+                "forecast": float(row["STATISTICALFORECASTQTY"]),
+                "actual": float(row["ACTUALSQTY"]),
+            }
+            for row in result.get("d", {}).get("results", [])
+        ]
+    if result_scope == "product":
+        grouped = {}
+        for row in rows:
+            group_key = (row["product"], row.get("period"))
+            grouped.setdefault(
+                group_key,
+                {
+                    "product": row["product"],
+                    "period": row.get("period"),
+                    "forecast": 0.0,
+                    "actual": 0.0,
+                },
+            )
+            grouped[group_key]["forecast"] += row["forecast"]
+            grouped[group_key]["actual"] += row["actual"]
+        rows = list(grouped.values())
+    for row in rows:
+        forecast, actual = row["forecast"], row["actual"]
+        variance_pct = ((actual - forecast) / forecast) * 100 if forecast else 0.0
+        direction = "over-consumption" if actual > forecast else "under-consumption"
+        direction_matches = (
+            alert_direction == "both"
+            or (alert_direction == "over" and direction == "over-consumption")
+            or (alert_direction == "under" and direction == "under-consumption")
+        )
+        analyses.append(
+            {
+                **row,
+                "variance_pct": round(variance_pct, 1),
+                "alert": direction_matches and abs(variance_pct) > threshold_pct,
+                "direction": direction,
+            }
+        )
+    response = {
+        "location_filter": location,
+        "product_filter": product,
+        "customer_filter": customer,
+        "result_scope": result_scope,
+        "threshold_pct": threshold_pct,
+            "alert_direction": alert_direction,
+            "period_start_rel": period_start_rel,
+            "period_end_rel": period_end_rel,
+        "count": len(analyses),
+        "alert_count": sum(item["alert"] for item in analyses),
+        "alert_results": [
+            {
+                key: item[key]
+                for key in ("product", "location", "customer", "period", "forecast", "actual", "variance_pct", "direction")
+                if key in item
+            }
+            for item in analyses
+            if item["alert"]
+        ],
+    }
+    if len(analyses) == 1:
+        response.update(analyses[0])
+    return response
 
 # ---------------------------------------------------------------------------
 # 2. Detect Anomaly in Forecast Pattern
@@ -365,154 +393,154 @@ _MOCK_STATISTICAL_FORECAST = {
 }
 
 def detect_forecast_anomalies(
-    product: str | None = None,
-    location: str | None = None,
-    customer: str | None = None,
-    sigma_threshold: float = 3.0,
-    flatline_min_periods: int = 4,
-    result_scope: str = "combination",
-) -> dict:
-   """
-    Scan statistical forecast time series for spikes/drops and flatlines.
-    Product, location, and customer filters are optional. Product scope
-    aggregates each product across locations and customers by period.
-   The statistical detection itself runs in deterministic Python, not in the
-   LLM prompt -- the agent only reasons over the structured result below.
-   """
-   if result_scope not in {"product", "combination"}:
-       raise ValueError("result_scope must be 'product' or 'combination'")
-   if USE_MOCK_DATA:
-       series_by_key = {
-           (row_product, None, None): {
-               index: value for index, value in enumerate(values)
-           }
-           for row_product, values in _MOCK_STATISTICAL_FORECAST.items()
-           if product is None or row_product == product
-       }
-   else:
-       filters = [
-           f"UOMTOID eq '{IBP_UOM_TO_ID}'",
-           f"PERIODID{IBP_PERIOD_LEVEL}_REL ge 0",
-       ]
-       if product:
-           filters.append(f"PRDID eq '{product}'")
-       if location:
-           filters.append(f"LOCID eq '{location}'")
-       if customer:
-           filters.append(f"CUSTID eq '{customer}'")
-       result = _ibp_get(
-           select=(
-               f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
-               f"UOMTOID,STATISTICALFORECASTQTY"
-           ),
-           filter_=" and ".join(filters),
-       )
-       rows = result.get("d", {}).get("results", [])
-       series_by_key = {}
-       for row in rows:
-           timestamp = row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP", "")
-           key = (row["PRDID"],) if result_scope == "product" else (
-               row["PRDID"], row["LOCID"], row.get("CUSTID")
-           )
-           series_by_key.setdefault(key, {})
-           series_by_key[key][timestamp] = (
-               series_by_key[key].get(timestamp, 0.0)
-               + float(row["STATISTICALFORECASTQTY"])
-           )
-   anomalies = []
-   for key, values in series_by_key.items():
-       if result_scope == "product":
-           product_id, location_id, customer_id = key[0], None, None
-       else:
-           product_id, location_id, customer_id = key
-       period_ids = sorted(values)
-       series = [values[period_id] for period_id in period_ids]
-       series_anomalies = _find_spikes_and_drops(product_id, series, sigma_threshold)
-       series_anomalies.extend(_find_flatlines(product_id, series, flatline_min_periods))
-       for anomaly in series_anomalies:
-           anomaly.update({"location_id": location_id, "customer_id": customer_id})
-           if "period_index" in anomaly:
-               anomaly["period"] = _period_month(period_ids[anomaly["period_index"]])
-           elif "period_start" in anomaly:
-               start = anomaly["period_start"]
-               end = start + anomaly["period_count"] - 1
-               anomaly["period_start"] = _period_month(period_ids[start])
-               anomaly["period_end"] = _period_month(period_ids[end])
-       anomalies.extend(series_anomalies)
-   return {
-       "forecast_type": "STATISTICALFORECASTQTY",
-       "product_filter": product,
-       "location_filter": location,
-       "customer_filter": customer,
-         "result_scope": result_scope,
-       "anomaly_count": len(anomalies),
-       "anomalies": anomalies,
-   }
+        product: str | None = None,
+        location: str | None = None,
+        customer: str | None = None,
+        sigma_threshold: float = 3.0,
+        flatline_min_periods: int = 4,
+        result_scope: str = "combination",
+    ) -> dict:
+    """
+        Scan statistical forecast time series for spikes/drops and flatlines.
+        Product, location, and customer filters are optional. Product scope
+        aggregates each product across locations and customers by period.
+    The statistical detection itself runs in deterministic Python, not in the
+    LLM prompt -- the agent only reasons over the structured result below.
+    """
+    if result_scope not in {"product", "combination"}:
+        raise ValueError("result_scope must be 'product' or 'combination'")
+    if USE_MOCK_DATA:
+        series_by_key = {
+            (row_product, None, None): {
+                index: value for index, value in enumerate(values)
+            }
+            for row_product, values in _MOCK_STATISTICAL_FORECAST.items()
+            if product is None or row_product == product
+        }
+    else:
+        filters = [
+            f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+            f"PERIODID{IBP_PERIOD_LEVEL}_REL ge 0",
+        ]
+        if product:
+            filters.append(f"PRDID eq '{product}'")
+        if location:
+            filters.append(f"LOCID eq '{location}'")
+        if customer:
+            filters.append(f"CUSTID eq '{customer}'")
+        result = _ibp_get(
+            select=(
+                f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+                f"UOMTOID,STATISTICALFORECASTQTY"
+            ),
+            filter_=" and ".join(filters),
+        )
+        rows = result.get("d", {}).get("results", [])
+        series_by_key = {}
+        for row in rows:
+            timestamp = row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP", "")
+            key = (row["PRDID"],) if result_scope == "product" else (
+                row["PRDID"], row["LOCID"], row.get("CUSTID")
+            )
+            series_by_key.setdefault(key, {})
+            series_by_key[key][timestamp] = (
+                series_by_key[key].get(timestamp, 0.0)
+                + float(row["STATISTICALFORECASTQTY"])
+            )
+    anomalies = []
+    for key, values in series_by_key.items():
+        if result_scope == "product":
+            product_id, location_id, customer_id = key[0], None, None
+        else:
+            product_id, location_id, customer_id = key
+        period_ids = sorted(values)
+        series = [values[period_id] for period_id in period_ids]
+        series_anomalies = _find_spikes_and_drops(product_id, series, sigma_threshold)
+        series_anomalies.extend(_find_flatlines(product_id, series, flatline_min_periods))
+        for anomaly in series_anomalies:
+            anomaly.update({"location_id": location_id, "customer_id": customer_id})
+            if "period_index" in anomaly:
+                anomaly["period"] = _period_month(period_ids[anomaly["period_index"]])
+            elif "period_start" in anomaly:
+                start = anomaly["period_start"]
+                end = start + anomaly["period_count"] - 1
+                anomaly["period_start"] = _period_month(period_ids[start])
+                anomaly["period_end"] = _period_month(period_ids[end])
+        anomalies.extend(series_anomalies)
+    return {
+        "forecast_type": "STATISTICALFORECASTQTY",
+        "product_filter": product,
+        "location_filter": location,
+        "customer_filter": customer,
+            "result_scope": result_scope,
+        "anomaly_count": len(anomalies),
+        "anomalies": anomalies,
+    }
 
 def _find_spikes_and_drops(product_id: str, series: list, sigma_threshold: float) -> list:
-   """
-   Uses a robust z-score (median absolute deviation) rather than mean/stdev.
-   A single large spike inflates ordinary stdev enough to mask itself --
-   MAD is far less sensitive to the outlier it's trying to detect.
-   """
-   if len(series) < 3:
-       return []
-   deltas = [series[i] - series[i - 1] for i in range(1, len(series))]
-   median_delta = statistics.median(deltas)
-   abs_devs = [abs(d - median_delta) for d in deltas]
-   mad = statistics.median(abs_devs)
-   if mad == 0:
-       delta_stddev = statistics.pstdev(deltas)
-       if delta_stddev == 0:
-           return []
-       scores = [abs(delta - median_delta) / delta_stddev for delta in deltas]
-   else:
-       # 0.6745 scales MAD to be comparable to a standard deviation for normal data
-       scores = [0.6745 * abs(delta - median_delta) / mad for delta in deltas]
-   found = []
-   for i, delta in enumerate(deltas):
-       if scores[i] > sigma_threshold:
-           previous_value = series[i]
-           pct_change = (delta / previous_value) * 100 if previous_value else 0
-           found.append(
-               {
-                   "product_id": product_id,
-                   "type": "spike" if delta > 0 else "drop",
-                   "period_index": i + 1,
-                   "pct_change": round(pct_change, 0),
-               }
-           )
-   return found
+    """
+    Uses a robust z-score (median absolute deviation) rather than mean/stdev.
+    A single large spike inflates ordinary stdev enough to mask itself --
+    MAD is far less sensitive to the outlier it's trying to detect.
+    """
+    if len(series) < 3:
+        return []
+    deltas = [series[i] - series[i - 1] for i in range(1, len(series))]
+    median_delta = statistics.median(deltas)
+    abs_devs = [abs(d - median_delta) for d in deltas]
+    mad = statistics.median(abs_devs)
+    if mad == 0:
+        delta_stddev = statistics.pstdev(deltas)
+        if delta_stddev == 0:
+            return []
+        scores = [abs(delta - median_delta) / delta_stddev for delta in deltas]
+    else:
+        # 0.6745 scales MAD to be comparable to a standard deviation for normal data
+        scores = [0.6745 * abs(delta - median_delta) / mad for delta in deltas]
+    found = []
+    for i, delta in enumerate(deltas):
+        if scores[i] > sigma_threshold:
+            previous_value = series[i]
+            pct_change = (delta / previous_value) * 100 if previous_value else 0
+            found.append(
+                {
+                    "product_id": product_id,
+                    "type": "spike" if delta > 0 else "drop",
+                    "period_index": i + 1,
+                    "pct_change": round(pct_change, 0),
+                }
+            )
+    return found
 
 def _find_flatlines(product_id: str, series: list, min_periods: int) -> list:
-   found = []
-   run_value, run_len, run_start = None, 0, 0
-   for i, v in enumerate(series):
-       if v == run_value and v != 0:
-           run_len += 1
-       else:
-           if run_len >= min_periods:
-               found.append(
-                   {
-                       "product_id": product_id,
-                       "type": "flatline",
-                       "value": run_value,
-                       "period_start": run_start,
-                       "period_count": run_len,
-                   }
-               )
-           run_value, run_len, run_start = v, 1, i
-   if run_len >= min_periods:
-       found.append(
-           {
-               "product_id": product_id,
-               "type": "flatline",
-               "value": run_value,
-               "period_start": run_start,
-               "period_count": run_len,
-           }
-       )
-   return found
+    found = []
+    run_value, run_len, run_start = None, 0, 0
+    for i, v in enumerate(series):
+        if v == run_value and v != 0:
+            run_len += 1
+        else:
+            if run_len >= min_periods:
+                found.append(
+                    {
+                        "product_id": product_id,
+                        "type": "flatline",
+                        "value": run_value,
+                        "period_start": run_start,
+                        "period_count": run_len,
+                    }
+                )
+            run_value, run_len, run_start = v, 1, i
+    if run_len >= min_periods:
+        found.append(
+            {
+                "product_id": product_id,
+                "type": "flatline",
+                "value": run_value,
+                "period_start": run_start,
+                "period_count": run_len,
+            }
+        )
+    return found
 
 # ---------------------------------------------------------------------------
 # 3. Sales History Data Readiness Check
@@ -520,51 +548,163 @@ def _find_flatlines(product_id: str, series: list, min_periods: int) -> list:
 _MOCK_LAST_LOADED_PERIOD = "2023-10"
 
 def get_sales_history_status(
-    target_period: Optional[str] = None,
-    product: str | None = None,
-    location: str | None = None,
-    customer: str | None = None,
-) -> dict:
-   """
-   Verify historical sales data (HISTSALES) is loaded through the target
-   period. Mirrors Joule skill: getSalesHistory.
-   """
-   if target_period is None:
-       target_period = datetime.utcnow().strftime("%Y-%m")
-   if USE_MOCK_DATA:
-       last_loaded = _MOCK_LAST_LOADED_PERIOD
-   else:
-       filters = [
-           f"UOMTOID eq '{IBP_UOM_TO_ID}'",
-           f"PERIODID{IBP_PERIOD_LEVEL}_REL eq 0",
-       ]
-       if product:
-           filters.append(f"PRDID eq '{product}'")
-       if location:
-           filters.append(f"LOCID eq '{location}'")
-       if customer:
-           filters.append(f"CUSTID eq '{customer}'")
-       result = _ibp_get(
-           select=(
-               f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
-               f"UOMTOID,HISTSALES"
-           ),
-           filter_=" and ".join(filters),
-       )
-       rows = result.get("d", {}).get("results", [])
-       period_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
-       last_loaded = _period_month(rows[0].get(period_field)) if rows else None
-   ready = last_loaded is not None and last_loaded >= target_period
-   return {
-       "target_period": target_period,
-                 "product_filter": product,
-                 "location_filter": location,
-                 "customer_filter": customer,
-       "last_loaded_period": last_loaded,
-          "period": last_loaded,
-         "period": last_loaded,
-       "ready": ready,
-   }
+        target_period: Optional[str] = None,
+        product: str | None = None,
+        location: str | None = None,
+        customer: str | None = None,
+        result_scope: str | None = None,
+    ) -> dict:
+    """
+        Verify actual sales quantity (ACTUALSQTY) is loaded through the target
+    period. Mirrors Joule skill: getSalesHistory.
+    """
+    if target_period is None:
+        target_period = datetime.utcnow().strftime("%Y-%m")
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", target_period):
+        raise ValueError("target_period must use YYYY-MM format")
+    if result_scope is None:
+        result_scope = "combination" if location or customer else "product"
+    if result_scope not in {"product", "location", "customer", "combination"}:
+        raise ValueError(
+            "result_scope must be 'product', 'location', 'customer', or 'combination'"
+        )
+    loaded_row_count = 0
+    missing_value_count = 0
+    target_period_row_count = 0
+    target_period_missing_value_count = 0
+    available_periods = []
+    period_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
+
+    def has_actual_value(row: dict) -> bool:
+        value = row.get("ACTUALSQTY")
+        if value is None or str(value).strip() == "":
+            return False
+        try:
+            return float(value) != 0
+        except (TypeError, ValueError):
+            return True
+
+    if USE_MOCK_DATA:
+        last_loaded = _MOCK_LAST_LOADED_PERIOD
+        loaded_row_count = 1
+        available_periods = [last_loaded]
+        target_period_row_count = 1 if target_period == last_loaded else 0
+    else:
+        select = (
+            f"PRDID,LOCID,CUSTID,PERIODID{IBP_PERIOD_LEVEL}_TSTAMP,"
+            f"UOMTOID,ACTUALSQTY"
+        )
+        rows = []
+        for product_id in _product_id_candidates(product):
+            filters = [
+                f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+                f"PERIODID{IBP_PERIOD_LEVEL}_REL ge -{int(os.environ.get('IBP_SALES_HISTORY_LOOKBACK_MONTHS', '36'))}",
+                f"PERIODID{IBP_PERIOD_LEVEL}_REL le 0",
+            ]
+            if product_id:
+                filters.append(f"PRDID eq '{product_id}'")
+            if location:
+                filters.append(f"LOCID eq '{_display_id(location)}'")
+            if customer:
+                filters.append(f"CUSTID eq '{_display_id(customer)}'")
+            result = _ibp_get(select=select, filter_=" and ".join(filters))
+            rows = result.get("d", {}).get("results", [])
+            if rows:
+                break
+        rows = result.get("d", {}).get("results", [])
+        period_values = {}
+        period_rows = {}
+        for row in rows:
+            period = _period_month(row.get(period_field))
+            if period is None:
+                continue
+            period_rows.setdefault(period, []).append(row)
+            try:
+                value = float(row.get("ACTUALSQTY"))
+            except (TypeError, ValueError):
+                value = 0.0
+            period_values[period] = period_values.get(period, 0.0) + value
+        if result_scope == "product":
+            available_periods = sorted(
+                period for period, value in period_values.items() if value != 0
+            )
+        else:
+            available_periods = sorted(
+                period
+                for period, period_rows_for_period in period_rows.items()
+                if any(has_actual_value(row) for row in period_rows_for_period)
+            )
+        last_loaded = max(available_periods) if available_periods else None
+        if result_scope == "product":
+            target_period_row_count = int(target_period in period_values)
+            target_period_missing_value_count = int(
+                period_values.get(target_period, 0.0) == 0
+            )
+            loaded_row_count = len(available_periods)
+            missing_value_count = len(period_values) - len(available_periods)
+        else:
+            target_rows = period_rows.get(target_period, [])
+            target_period_row_count = len(target_rows)
+            target_period_missing_value_count = sum(
+                1 for row in target_rows if not has_actual_value(row)
+            )
+            loaded_row_count = sum(1 for row in rows if has_actual_value(row))
+            missing_value_count = sum(
+                1 for row in rows if not has_actual_value(row)
+            )
+    missing_periods = []
+    if available_periods:
+        expected_periods = _months_between(available_periods[0], available_periods[-1])
+        if USE_MOCK_DATA:
+            period_rows = {last_loaded: [{}]}
+        missing_periods = [
+            period
+            for period in expected_periods
+            if period not in period_rows
+            or (
+                result_scope == "combination"
+                and any(not has_actual_value(row) for row in period_rows[period])
+            )
+            or (
+                result_scope in {"product", "location", "customer"}
+                and not any(has_actual_value(row) for row in period_rows[period])
+            )
+        ]
+    ready = (
+        target_period_row_count > 0
+        and target_period_missing_value_count == 0
+    )
+    target_period_missing = not ready
+    target_warning = (
+        f"No ACTUALSQTY data is loaded for target period {target_period}."
+        if target_period_missing
+        else None
+    )
+    warning = (
+        f"Missing ACTUALSQTY data for periods: {', '.join(missing_periods)}"
+        if missing_periods
+        else None
+    )
+    return {
+        "target_period": target_period,
+        "product_filter": product,
+        "location_filter": location,
+        "customer_filter": customer,
+        "result_scope": result_scope,
+        "last_loaded_period": last_loaded,
+        "period": last_loaded,
+        "loaded_row_count": loaded_row_count,
+        "missing_value_count": missing_value_count,
+        "target_period_row_count": target_period_row_count,
+        "target_period_missing_value_count": target_period_missing_value_count,
+        "target_period_missing": target_period_missing,
+        "target_warning": target_warning,
+        "available_periods": available_periods,
+        "missing_periods": missing_periods,
+        "inconsistency_detected": bool(missing_periods),
+        "warning": warning,
+        "ready": ready,
+    }
 
 # ---------------------------------------------------------------------------
 # 4. Communication (Email)
@@ -572,38 +712,38 @@ def get_sales_history_status(
 EMAIL_MODE = os.environ.get("EMAIL_MODE", "mock")  # mock | smtp | sendgrid
 
 def send_email(recipient: str, subject: str, body: str) -> dict:
-   """
-   Send an email notification. Replaces the original CAP email service +
-   BPA workflow with a direct call -- SMTP or a transactional email API.
-   Mirrors Joule skill: Communication Skill.
-   """
-   if EMAIL_MODE == "mock":
-       return {"status": "sent (mock)", "recipient": recipient, "subject": subject}
-   if EMAIL_MODE == "smtp":
-       import smtplib
-       from email.mime.text import MIMEText
-       msg = MIMEText(body)
-       msg["Subject"] = subject
-       msg["From"] = os.environ["SMTP_FROM"]
-       msg["To"] = recipient
-       with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ.get("SMTP_PORT", 587))) as s:
-           s.starttls()
-           s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-           s.send_message(msg)
-       return {"status": "sent", "recipient": recipient, "subject": subject}
-   if EMAIL_MODE == "sendgrid":
-       api_key = os.environ["SENDGRID_API_KEY"]
-       resp = requests.post(
-           "https://api.sendgrid.com/v3/mail/send",
-           headers={"Authorization": f"Bearer {api_key}"},
-           json={
-               "personalizations": [{"to": [{"email": recipient}]}],
-               "from": {"email": os.environ["SENDGRID_FROM"]},
-               "subject": subject,
-               "content": [{"type": "text/plain", "value": body}],
-           },
-           timeout=15,
-       )
-       resp.raise_for_status()
-       return {"status": "sent", "recipient": recipient, "subject": subject}
-   raise ValueError(f"Unknown EMAIL_MODE: {EMAIL_MODE}")
+    """
+    Send an email notification. Replaces the original CAP email service +
+    BPA workflow with a direct call -- SMTP or a transactional email API.
+    Mirrors Joule skill: Communication Skill.
+    """
+    if EMAIL_MODE == "mock":
+        return {"status": "sent (mock)", "recipient": recipient, "subject": subject}
+    if EMAIL_MODE == "smtp":
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = os.environ["SMTP_FROM"]
+        msg["To"] = recipient
+        with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ.get("SMTP_PORT", 587))) as s:
+            s.starttls()
+            s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
+            s.send_message(msg)
+        return {"status": "sent", "recipient": recipient, "subject": subject}
+    if EMAIL_MODE == "sendgrid":
+        api_key = os.environ["SENDGRID_API_KEY"]
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "personalizations": [{"to": [{"email": recipient}]}],
+                "from": {"email": os.environ["SENDGRID_FROM"]},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": body}],
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return {"status": "sent", "recipient": recipient, "subject": subject}
+    raise ValueError(f"Unknown EMAIL_MODE: {EMAIL_MODE}")

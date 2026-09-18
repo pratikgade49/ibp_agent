@@ -34,18 +34,30 @@ query argument; the configured data-source UOM is used.
 When a check reveals a problem (variance over threshold, anomalies found, \
 or missing sales data), offer to send an email notification via the \
 send_email tool, but only send it if the user confirms.
+For get_sales_history_status, report readiness and continuity separately: \
+ready=true means the target period has ACTUALSQTY data; \
+inconsistency_detected=true is a warning about missing historical periods and \
+must not be reported as not ready unless ready=false.
+For aggregated readiness requests, call get_sales_history_status with \
+result_scope='product', 'location', or 'customer' as appropriate. These scopes \
+aggregate ACTUALSQTY across the other dimensions. Use result_scope='combination' \
+only when the planner wants the exact product/location/customer intersection checked.
+If ready=false but last_loaded_period and available_periods contain history, \
+report that historical data exists and only the target period is missing. Do not \
+say that no historical data exists. Treat target_period_missing separately from \
+inconsistency_detected, which is only for gaps between loaded historical periods.
 When a tool returns multiple results, report the summary counts and list every
 item in alert_results in a compact markdown table with period, product, location,
 customer, forecast, actual, variance, and direction. Do not report only the
 total count. The tool payload contains alert_results only, not every evaluated
 row."""
 TOOL_REGISTRY = {
-   "get_forecast_vs_consumption": get_forecast_vs_consumption,
-   "detect_forecast_anomalies": detect_forecast_anomalies,
-   "get_sales_history_status": get_sales_history_status,
-    "query_planning_data": query_planning_data,
-   "send_email": send_email,
-}
+    "get_forecast_vs_consumption": get_forecast_vs_consumption,
+    "detect_forecast_anomalies": detect_forecast_anomalies,
+    "get_sales_history_status": get_sales_history_status,
+        "query_planning_data": query_planning_data,
+    "send_email": send_email,
+    }
 TOOL_SCHEMAS = [
    {
        "name": "get_forecast_vs_consumption",
@@ -90,6 +102,7 @@ TOOL_SCHEMAS = [
                "product": {"type": "string", "description": "Optional product ID"},
                "location": {"type": "string", "description": "Optional location ID"},
                "customer": {"type": "string", "description": "Optional customer ID"},
+               "result_scope": {"type": "string", "enum": ["product", "location", "customer", "combination"], "description": "Aggregate ACTUALSQTY by product, location, or customer across the other dimensions; use combination for an exact product/location/customer check"},
            },
        },
    },
@@ -130,60 +143,60 @@ TOOL_SCHEMAS = [
 ]
 
 class AgentState(TypedDict):
-   messages: Annotated[list, add_messages]
+    messages: Annotated[list, add_messages]
 
 def agent_node(state: AgentState) -> dict:
-   client = get_llm_client()
-   message = client.chat(
-       system=SYSTEM_PROMPT,
-       messages=state["messages"],
-       tools=TOOL_SCHEMAS,
-   )
-   return {"messages": [message]}
+    client = get_llm_client()
+    message = client.chat(
+        system=SYSTEM_PROMPT,
+        messages=state["messages"],
+        tools=TOOL_SCHEMAS,
+    )
+    return {"messages": [message]}
 
 def _message_content(message) -> list:
     return message.content if hasattr(message, "content") else message.get("content", [])
 
 def tool_node(state: AgentState) -> dict:
-   last_message = state["messages"][-1]
-   tool_results = []
-   for block in _message_content(last_message):
-       if block.get("type") != "tool_use":
-           continue
-       fn = TOOL_REGISTRY[block["name"]]
-       try:
-           result = fn(**block["input"])
-       except Exception as exc:  # surface tool errors back to the LLM, don't crash the graph
-           result = {"error": str(exc)}
-       tool_results.append(
-           {
-               "type": "tool_result",
-               "tool_use_id": block["id"],
-               "name": block["name"],
-               "content": str(result),
-           }
-       )
-   return {"messages": [{"role": "user", "content": tool_results}]}
+    last_message = state["messages"][-1]
+    tool_results = []
+    for block in _message_content(last_message):
+        if block.get("type") != "tool_use":
+            continue
+        fn = TOOL_REGISTRY[block["name"]]
+        try:
+            result = fn(**block["input"])
+        except Exception as exc:  # surface tool errors back to the LLM, don't crash the graph
+            result = {"error": str(exc)}
+        tool_results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": block["id"],
+                "name": block["name"],
+                "content": str(result),
+            }
+        )
+    return {"messages": [{"role": "user", "content": tool_results}]}
 
 def route_after_agent(state: AgentState) -> str:
-   last_message = state["messages"][-1]
-   has_tool_call = any(
-       block.get("type") == "tool_use" for block in _message_content(last_message)
-   )
-   return "tool_node" if has_tool_call else END
+    last_message = state["messages"][-1]
+    has_tool_call = any(
+        block.get("type") == "tool_use" for block in _message_content(last_message)
+    )
+    return "tool_node" if has_tool_call else END
 
 def build_graph():
-   graph = StateGraph(AgentState)
-   graph.add_node("agent_node", agent_node)
-   graph.add_node("tool_node", tool_node)
-   graph.set_entry_point("agent_node")
-   graph.add_conditional_edges("agent_node", route_after_agent, {"tool_node": "tool_node", END: END})
-   graph.add_edge("tool_node", "agent_node")
-   return graph.compile()
+    graph = StateGraph(AgentState)
+    graph.add_node("agent_node", agent_node)
+    graph.add_node("tool_node", tool_node)
+    graph.set_entry_point("agent_node")
+    graph.add_conditional_edges("agent_node", route_after_agent, {"tool_node": "tool_node", END: END})
+    graph.add_edge("tool_node", "agent_node")
+    return graph.compile()
 
 def run_agent(user_message: str) -> str:
-   app = build_graph()
-   final_state = app.invoke({"messages": [{"role": "user", "content": user_message}]})
-   last = final_state["messages"][-1]
-   text_blocks = [b["text"] for b in _message_content(last) if b.get("type") == "text"]
-   return "\n".join(text_blocks) if text_blocks else str(last)
+    app = build_graph()
+    final_state = app.invoke({"messages": [{"role": "user", "content": user_message}]})
+    last = final_state["messages"][-1]
+    text_blocks = [b["text"] for b in _message_content(last) if b.get("type") == "text"]
+    return "\n".join(text_blocks) if text_blocks else str(last)
