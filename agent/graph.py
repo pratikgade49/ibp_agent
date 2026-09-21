@@ -20,6 +20,9 @@ from agent.tools import (
    get_sales_history_status,
     query_planning_data,
    send_email,
+    update_planning_data,
+    recommend_planning_action,
+    import_master_data,
 )
 SYSTEM_PROMPT = """You are the IBP Demand Planning Agent. You help demand \
 planners validate data, monitor consumption variance, and detect forecast \
@@ -52,12 +55,31 @@ item in alert_results in a compact markdown table with period, product, location
 customer, forecast, actual, variance, and direction. Do not report only the
 total count. The tool payload contains alert_results only, not every evaluated
 row."""
+SYSTEM_PROMPT += """
+For update_planning_data, never write on the first request. First explain the
+exact product, location, period, version, and new forecast value and ask for explicit
+confirmation. Call it with confirm=true only after the user clearly confirms
+the proposed change.
+When an anomaly or over/under-consumption finding is detected, call
+recommend_planning_action and report its summary and actions. Treat its
+proposed_forecast as a proposal only; call update_planning_data only after
+the user explicitly confirms the exact change.
+For update results, report that the import was submitted when the POST
+succeeds. Do not call it successfully committed, because this integration
+does not poll asynchronous SAP processing status.
+For import_master_data, always summarize the master data type, attributes,
+record count, and whether this is an import or deletion. Call it only after
+the user explicitly confirms the exact operation.
+"""
 TOOL_REGISTRY = {
     "get_forecast_vs_consumption": get_forecast_vs_consumption,
     "detect_forecast_anomalies": detect_forecast_anomalies,
     "get_sales_history_status": get_sales_history_status,
         "query_planning_data": query_planning_data,
     "send_email": send_email,
+    "update_planning_data": update_planning_data,
+    "recommend_planning_action": recommend_planning_action,
+    "import_master_data": import_master_data,
     }
 TOOL_SCHEMAS = [
    {
@@ -139,6 +161,61 @@ TOOL_SCHEMAS = [
                "body": {"type": "string"},
            },
            "required": ["recipient", "subject", "body"],
+       },
+   },
+   {
+       "name": "update_planning_data",
+    "description": "Import one SAP IBP key-figure row. The user may provide any ordered aggregation_fields and matching aggregation_values, such as CUSTID,PRDID,AOPQTY,PERIODID3_TSTAMP. Always ask for explicit confirmation first.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "product": {"type": "string", "description": "Product ID"},
+               "location": {"type": "string", "description": "Optional location ID; provide location or customer"},
+               "customer": {"type": "string", "description": "Optional customer ID"},
+               "period": {"type": "string", "description": "Planning period in YYYY-MM format"},
+               "forecast": {"type": "number", "description": "Convenience value for the configured default key figure"},
+               "uom": {"type": "string", "description": "Optional unit of measure"},
+               "version": {"type": "string", "description": "Optional SAP IBP version ID, for example UPSIDE"},
+               "aggregation_fields": {"type": "array", "items": {"type": "string"}, "description": "Ordered fields for AggregationLevelFieldsString"},
+               "aggregation_values": {"type": "array", "items": {"type": "object", "properties": {"field": {"type": "string"}, "value": {"type": "string"}}, "required": ["field", "value"]}, "description": "Field/value entries matching aggregation_fields exactly"},
+               "confirm": {"type": "boolean", "description": "Must be true only after explicit user confirmation"},
+           },
+           "required": ["confirm"],
+       },
+   },
+   {
+       "name": "recommend_planning_action",
+       "description": "Create a business recommendation for forecast over-consumption, under-consumption, spike, drop, or flatline. This tool never changes SAP IBP data.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "issue_type": {"type": "string", "enum": ["over_consumption", "under_consumption", "spike", "drop", "flatline"]},
+               "product": {"type": "string", "description": "Product ID"},
+               "location": {"type": "string", "description": "Optional location ID"},
+               "period": {"type": "string", "description": "Optional planning period in YYYY-MM format"},
+               "forecast": {"type": "number", "description": "Optional forecast quantity from the finding"},
+               "actual": {"type": "number", "description": "Optional actual quantity from the finding"},
+               "anomaly_type": {"type": "string", "description": "Optional detected anomaly type"},
+               "anomaly_period": {"type": "string", "description": "Optional anomaly period"},
+           },
+           "required": ["issue_type", "product"],
+       },
+   },
+   {
+       "name": "import_master_data",
+       "description": "Create, modify, or delete SAP IBP master-data records using the Master Data OData API. Always request explicit confirmation before writing.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "master_data_type": {"type": "string", "description": "SAP master data type, for example LOCATION or LOCATIONPRODUCT"},
+               "requested_attributes": {"type": "array", "items": {"type": "string"}, "description": "Attributes included in the import"},
+               "records": {"type": "array", "items": {"type": "object"}, "description": "One to 5000 master-data records"},
+               "planning_area": {"type": "string", "description": "Optional planning area for version-specific master data"},
+               "version": {"type": "string", "description": "Optional version ID"},
+               "delete_entries": {"type": "boolean", "description": "Delete complete records instead of importing values"},
+               "confirm": {"type": "boolean", "description": "Must be true only after explicit user confirmation"},
+           },
+           "required": ["master_data_type", "requested_attributes", "records", "confirm"],
        },
    },
 ]

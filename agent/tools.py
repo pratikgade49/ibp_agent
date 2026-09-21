@@ -12,6 +12,7 @@ PLANNING_DATA_API_SRV OData service instead.
 import os
 import re
 import statistics
+import uuid
 from datetime import datetime
 from typing import Optional
 import requests
@@ -31,9 +32,19 @@ IBP_PASSWORD = os.environ.get("IBP_PASSWORD", "")
 IBP_PLANNING_AREA = os.environ.get("IBP_PLANNING_AREA", "YCIBP1")
 IBP_PERIOD_LEVEL = os.environ.get("IBP_PERIOD_LEVEL", "3")
 IBP_UOM_TO_ID = os.environ.get("IBP_UOM_TO_ID", "EA")
+IBP_KEY_FIGURE = os.environ.get("IBP_KEY_FIGURE", "STATISTICALFORECASTQTY")
+IBP_TRANSACTION_NAME = os.environ.get("IBP_TRANSACTION_NAME", "IBP Demand Agent")
+IBP_NAVIGATION_PROPERTY = os.environ.get(
+    "IBP_NAVIGATION_PROPERTY", f"Nav{IBP_PLANNING_AREA}"
+)
 PLANNING_DATA_PATH = (
     "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV/"
     f"{IBP_PLANNING_AREA}"
+)
+IBP_SERVICE_ROOT = "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV"
+MASTER_DATA_SERVICE_ROOT = "/sap/opu/odata/IBP/MASTER_DATA_API_SRV"
+MASTER_DATA_TRANSACTION_NAME = os.environ.get(
+    "MASTER_DATA_TRANSACTION_NAME", "IBP Demand Agent Master Data"
 )
 
 def _period_month(period_id) -> str | None:
@@ -91,6 +102,323 @@ def _ibp_get(select: str, filter_: str) -> dict:
             f"select={select}; filter={filter_}; response={resp.text}"
         )
     return resp.json()
+
+
+def _period_timestamp(period: str) -> str:
+    """Convert a YYYY-MM period to the timestamp expected by the import API."""
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+        raise ValueError("period must use YYYY-MM format")
+    return f"{period}-01T00:00:00"
+
+
+def _ibp_write(payload: dict) -> dict:
+    """Import one planning record through the documented Trans API."""
+    transaction_url = (
+        f"{IBP_BASE_URL}{PLANNING_DATA_PATH}Trans"
+    )
+    service_root = f"{IBP_BASE_URL}{IBP_SERVICE_ROOT}"
+    session = requests.Session()
+    token_response = session.get(
+        f"{service_root}/$metadata",
+        headers={"x-csrf-token": "fetch", "Accept": "application/xml"},
+        auth=(IBP_USER, IBP_PASSWORD),
+        timeout=30,
+    )
+    if not token_response.ok:
+        raise RuntimeError(
+            f"SAP IBP CSRF token request failed with HTTP {token_response.status_code}: "
+            f"{token_response.text}"
+        )
+    csrf_token = token_response.headers.get("x-csrf-token")
+    if not csrf_token:
+        raise RuntimeError("SAP IBP did not return an x-csrf-token")
+    response = session.post(
+        transaction_url,
+        json=payload,
+        headers={
+            "x-csrf-token": csrf_token,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        auth=(IBP_USER, IBP_PASSWORD),
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"SAP IBP import failed with HTTP {response.status_code}: {response.text}"
+        )
+    return {
+        "status": "import_submitted",
+        "method": "POST",
+        "endpoint": transaction_url,
+        "planning_area": IBP_PLANNING_AREA,
+        "transaction_id": payload["Transactionid"],
+        "payload": payload,
+        "response": response.json() if response.content else {},
+    }
+
+
+def update_planning_data(
+    product: str | None = None,
+    location: str | None = None,
+    period: str | None = None,
+    forecast: float | None = None,
+    customer: str | None = None,
+    uom: str | None = None,
+    version: str | None = None,
+    aggregation_fields: list[str] | None = None,
+    aggregation_values: dict[str, str | int | float] | list[dict[str, str]] | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Import one key-figure row with a caller-defined planning level."""
+    if aggregation_fields is not None or aggregation_values is not None:
+        if not aggregation_fields or not aggregation_values:
+            raise ValueError("aggregation_fields and aggregation_values are both required")
+        if isinstance(aggregation_values, list):
+            aggregation_values = {
+                item["field"]: item["value"] for item in aggregation_values
+            }
+        if set(aggregation_fields) != set(aggregation_values):
+            raise ValueError("aggregation_fields must exactly match aggregation_values keys")
+        if len(set(aggregation_fields)) != len(aggregation_fields):
+            raise ValueError("aggregation_fields must not contain duplicates")
+        fields = list(aggregation_fields)
+        row = dict(aggregation_values)
+        for field in fields:
+            if field.endswith("_TSTAMP") and re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", str(row[field])):
+                row[field] = _period_timestamp(str(row[field]))
+    else:
+        if not product or not period or forecast is None:
+            raise ValueError("product, period, and forecast are required without aggregation_values")
+        if not location and not customer:
+            raise ValueError("location or customer is required")
+        row = {
+            "PRDID": _display_id(product),
+            f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP": _period_timestamp(period),
+            IBP_KEY_FIGURE: str(forecast),
+        }
+        fields = []
+        if location:
+            row["LOCID"] = _display_id(location)
+            fields.append("LOCID")
+        if customer:
+            row["CUSTID"] = _display_id(customer)
+            fields.append("CUSTID")
+        fields.extend(["PRDID", IBP_KEY_FIGURE, f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"])
+    if not confirm:
+        return {
+            "status": "confirmation_required",
+            "message": (
+                f"This will import fields {', '.join(fields)} with values {row}. "
+                "Ask the user to confirm before writing."
+            ),
+        }
+    transaction_payload = {
+        "Transactionid": uuid.uuid4().hex,
+        "AggregationLevelFieldsString": ",".join(fields),
+        "DoCommit": True,
+        "TransactionName": IBP_TRANSACTION_NAME,
+        IBP_NAVIGATION_PROPERTY: [row],
+    }
+    if version:
+        transaction_payload["VersionID"] = version
+    return _ibp_write(transaction_payload)
+
+
+def _master_data_write(master_data_type: str, payload: dict) -> dict:
+    """Import master-data records through the documented Trans entity."""
+    service_root = f"{IBP_BASE_URL}{MASTER_DATA_SERVICE_ROOT}"
+    transaction_url = f"{service_root}/{master_data_type}Trans"
+    session = requests.Session()
+    token_response = session.get(
+        f"{service_root}/$metadata",
+        headers={"x-csrf-token": "fetch", "Accept": "application/xml"},
+        auth=(IBP_USER, IBP_PASSWORD),
+        timeout=30,
+    )
+    if not token_response.ok:
+        raise RuntimeError(
+            f"SAP IBP master-data CSRF request failed with HTTP "
+            f"{token_response.status_code}: {token_response.text}"
+        )
+    csrf_token = token_response.headers.get("x-csrf-token")
+    if not csrf_token:
+        raise RuntimeError("SAP IBP did not return an x-csrf-token")
+    response = session.post(
+        transaction_url,
+        json=payload,
+        headers={
+            "x-csrf-token": csrf_token,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        auth=(IBP_USER, IBP_PASSWORD),
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"SAP IBP master-data import failed with HTTP "
+            f"{response.status_code}: {response.text}"
+        )
+    return {
+        "status": "import_submitted",
+        "method": "POST",
+        "endpoint": transaction_url,
+        "master_data_type": master_data_type,
+        "response": response.json() if response.content else {},
+    }
+
+
+def import_master_data(
+    master_data_type: str,
+    requested_attributes: list[str],
+    records: list[dict],
+    planning_area: str | None = None,
+    version: str | None = None,
+    delete_entries: bool = False,
+    confirm: bool = False,
+) -> dict:
+    """Create, modify, or delete master data after explicit confirmation."""
+    master_data_type = master_data_type.strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", master_data_type):
+        raise ValueError("master_data_type must be a valid SAP entity name")
+    if not requested_attributes:
+        raise ValueError("requested_attributes must not be empty")
+    if not records or len(records) > 5000:
+        raise ValueError("records must contain between 1 and 5000 items")
+    if not confirm:
+        operation = "delete" if delete_entries else "import"
+        return {
+            "status": "confirmation_required",
+            "message": (
+                f"This will {operation} {len(records)} record(s) for "
+                f"master data type {master_data_type}. Ask the user to confirm "
+                "before writing."
+            ),
+        }
+    payload = {
+        "TransactionID": uuid.uuid4().hex,
+        "RequestedAttributes": ",".join(requested_attributes),
+        "DoCommit": True,
+        "TransactionName": MASTER_DATA_TRANSACTION_NAME,
+        f"Nav{master_data_type}": records,
+    }
+    if planning_area:
+        payload["PlanningAreaID"] = planning_area
+    if version:
+        payload["VersionID"] = version
+    if delete_entries:
+        payload["DeleteEntries"] = True
+    return _master_data_write(master_data_type, payload)
+
+
+def recommend_planning_action(
+    issue_type: str,
+    product: str,
+    location: str | None = None,
+    period: str | None = None,
+    forecast: float | None = None,
+    actual: float | None = None,
+    anomaly_type: str | None = None,
+    anomaly_period: str | None = None,
+) -> dict:
+    """Create an explainable recommendation without changing SAP IBP data."""
+    allowed_issue_types = {
+        "over_consumption",
+        "under_consumption",
+        "spike",
+        "drop",
+        "flatline",
+    }
+    if issue_type not in allowed_issue_types:
+        raise ValueError(f"issue_type must be one of {sorted(allowed_issue_types)}")
+    if forecast is not None and forecast < 0:
+        raise ValueError("forecast cannot be negative")
+    if actual is not None and actual < 0:
+        raise ValueError("actual cannot be negative")
+
+    recommendation = {
+        "product": product,
+        "location": location,
+        "period": period or anomaly_period,
+        "issue_type": issue_type,
+        "action": "investigate",
+        "proposed_forecast": None,
+        "requires_confirmation": False,
+    }
+    if issue_type == "over_consumption":
+        recommendation.update(
+            {
+                "summary": "Actual consumption is above the statistical forecast.",
+                "actions": [
+                    "Check whether the increase is driven by a customer order or promotion.",
+                    "Validate inventory and supply constraints before increasing the forecast.",
+                    "Review the next planning periods for a recurring pattern.",
+                ],
+            }
+        )
+    elif issue_type == "under_consumption":
+        recommendation.update(
+            {
+                "summary": "Actual consumption is below the statistical forecast.",
+                "actions": [
+                    "Check for cancellations, stock-outs, or delayed consumption postings.",
+                    "Validate whether the lower demand is temporary or recurring.",
+                    "Review customer and location segmentation before reducing the forecast.",
+                ],
+            }
+        )
+    elif issue_type == "spike":
+        recommendation.update(
+            {
+                "summary": "A sudden upward movement was detected in the forecast pattern.",
+                "actions": [
+                    "Verify the underlying demand signal and source data.",
+                    "Check for a one-time order or promotion before propagating the increase.",
+                    "Use a business-approved adjustment only after the spike is validated.",
+                ],
+            }
+        )
+    elif issue_type == "drop":
+        recommendation.update(
+            {
+                "summary": "A sudden downward movement was detected in the forecast pattern.",
+                "actions": [
+                    "Check for missing data, supply disruption, or a demand cancellation.",
+                    "Confirm the drop is not caused by a period or unit-of-measure issue.",
+                    "Review the next periods before applying a forecast reduction.",
+                ],
+            }
+        )
+    else:
+        recommendation.update(
+            {
+                "summary": "The forecast has remained unchanged across multiple periods.",
+                "actions": [
+                    "Check whether the series is intentionally fixed or missing refreshed inputs.",
+                    "Validate the planning job and source data load status.",
+                    "Do not adjust the forecast until the flatline cause is understood.",
+                ],
+            }
+        )
+
+    if forecast is not None and actual is not None and forecast > 0:
+        variance_pct = (actual - forecast) / forecast * 100
+        recommendation["variance_pct"] = round(variance_pct, 1)
+        recommendation["proposed_forecast"] = round(actual, 2)
+        recommendation["action"] = "review_and_confirm_forecast_change"
+        recommendation["requires_confirmation"] = True
+        recommendation["change_note"] = (
+            f"Review changing the forecast from {forecast} to {actual}; "
+            "this is a proposal only and has not been written to SAP IBP."
+        )
+    elif forecast == 0 and actual not in (None, 0):
+        recommendation["variance_pct"] = None
+        recommendation["change_note"] = (
+            "A percentage variance is not calculable because the forecast is zero. "
+            "Validate the baseline before proposing a numeric change."
+        )
+    return recommendation
 
 # ---------------------------------------------------------------------------
 # 1. Forecast vs. Consumption Alert
