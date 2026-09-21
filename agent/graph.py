@@ -15,6 +15,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from agent.llm import get_llm_client
 from agent.tools import (
+    analyze_capacity_bottlenecks,
    detect_forecast_anomalies,
    get_forecast_vs_consumption,
    get_sales_history_status,
@@ -27,9 +28,28 @@ from agent.tools import (
 SYSTEM_PROMPT = """You are the IBP Demand Planning Agent. You help demand \
 planners validate data, monitor consumption variance, and detect forecast \
 anomalies in SAP Integrated Business Planning.
-You have five tools available. Decide which tool(s) to call and in what \
+You have nine tools available. Decide which tool(s) to call and in what \
 order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
+For capacity questions, use analyze_capacity_bottlenecks. Match natural-language
+resource terms such as production, storage, handling, transport, or all to the
+resource_type argument. The tool uses IBP key figures CAPADEMAND/CAPAUSAGE for
+handling and storage, PCAPADEMAND/PCAPAUSAGE for production,
+TCAPADEMAND/TCAPAUSAGE for transportation, and CAPASUPPLY for capacity supply.
+Capacity questions may be phrased as: "Which resources are bottlenecks in the
+next three periods?", "Show production capacity shortages", "Which warehouses
+are above 80 percent utilization?", "Is handling capacity sufficient?", or
+"Which transport resources have no headroom?". Use period_start_rel=1 and
+period_end_rel=3 for the next three periods when the user says next three
+periods. Use utilization_threshold_pct when the user gives a percentage.
+Report shortage, utilization, headroom, period, resource, location, product,
+and production source when present. Do not invent resource IDs or capacity
+values. If analysis_status is no_activity_data, explain that all returned
+demand and usage values are zero and do not claim that capacity is confirmed
+within limits. If analysis_status is incomplete_data, report the warning and do
+not present the result as a complete bottleneck assessment. This analysis is
+read-only; never write capacity changes without a separate explicit confirmation
+workflow.
 Use query_planning_data for generic questions involving totals, rankings, \
 maximums, minimums, averages, comparisons, or base planning-level results. \
 For base planning level, group by product, location, customer, and period \
@@ -72,6 +92,7 @@ record count, and whether this is an import or deletion. Call it only after
 the user explicitly confirms the exact operation.
 """
 TOOL_REGISTRY = {
+    "analyze_capacity_bottlenecks": analyze_capacity_bottlenecks,
     "get_forecast_vs_consumption": get_forecast_vs_consumption,
     "detect_forecast_anomalies": detect_forecast_anomalies,
     "get_sales_history_status": get_sales_history_status,
@@ -82,6 +103,23 @@ TOOL_REGISTRY = {
     "import_master_data": import_master_data,
     }
 TOOL_SCHEMAS = [
+   {
+       "name": "analyze_capacity_bottlenecks",
+       "description": "Analyze SAP IBP capacity bottlenecks. Use resource_type='production' for PCAPADEMAND/PCAPAUSAGE, 'storage' or 'handling' for CAPADEMAND/CAPAUSAGE, 'transportation' for TCAPADEMAND/TCAPAUSAGE, or 'all'. Match terms like production capacity, warehouse/storage capacity, goods-receipt/handling capacity, and transport capacity. Returns demand, usage, CAPASUPPLY, shortage, headroom, utilization, and affected dimensions.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "resource_type": {"type": "string", "enum": ["handling", "storage", "production", "transportation", "all"]},
+               "resource": {"type": "string", "description": "Optional resource ID returned by IBP"},
+               "location": {"type": "string", "description": "Optional location ID"},
+               "product": {"type": "string", "description": "Optional product ID"},
+               "period_start_rel": {"type": "integer", "description": "Relative period start; 0 is current"},
+               "period_end_rel": {"type": "integer", "description": "Relative period end; 3 means the next three periods when start is 1"},
+               "utilization_threshold_pct": {"type": "number", "description": "Flag capacity at or above this usage percentage; default 80"},
+           },
+           "required": [],
+       },
+   },
    {
        "name": "get_forecast_vs_consumption",
     "description": "Compare statistical forecast vs actual consumption. Use alert_direction='over' when the planner says above forecast, 'under' for below forecast, or 'both' for either direction. Use result_scope='product' for product totals or 'combination' for detail.",

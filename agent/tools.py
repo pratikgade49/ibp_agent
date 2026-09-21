@@ -34,6 +34,22 @@ IBP_PERIOD_LEVEL = os.environ.get("IBP_PERIOD_LEVEL", "3")
 IBP_UOM_TO_ID = os.environ.get("IBP_UOM_TO_ID", "EA")
 IBP_KEY_FIGURE = os.environ.get("IBP_KEY_FIGURE", "STATISTICALFORECASTQTY")
 IBP_TRANSACTION_NAME = os.environ.get("IBP_TRANSACTION_NAME", "IBP Demand Agent")
+# Standard IBP capacity key figures. Their names remain fixed vocabulary for
+# natural-language matching, while planning-area dimensions are configurable.
+CAPACITY_KEY_FIGURES = {
+    "handling": ("CAPADEMAND", "CAPAUSAGE"),
+    "storage": ("CAPADEMAND", "CAPAUSAGE"),
+    "production": ("PCAPADEMAND", "PCAPAUSAGE"),
+    "transportation": ("TCAPADEMAND", "TCAPAUSAGE"),
+}
+CAPACITY_SUPPLY_KEY_FIGURE = "CAPASUPPLY"
+CAPACITY_RESOURCE_FIELD = os.environ.get("IBP_CAPACITY_RESOURCE_FIELD", "RESID")
+CAPACITY_SOURCE_FIELD = os.environ.get("IBP_CAPACITY_SOURCE_FIELD", "SOURCEID")
+CAPACITY_SOURCE_TYPES = {
+    value.strip().lower()
+    for value in os.environ.get("IBP_CAPACITY_SOURCE_TYPES", "production,transportation").split(",")
+    if value.strip()
+}
 IBP_NAVIGATION_PROPERTY = os.environ.get(
     "IBP_NAVIGATION_PROPERTY", f"Nav{IBP_PLANNING_AREA}"
 )
@@ -723,7 +739,186 @@ def get_forecast_vs_consumption(
     return response
 
 # ---------------------------------------------------------------------------
-# 2. Detect Anomaly in Forecast Pattern
+# 2. IBP Capacity Bottleneck Resolver
+# ---------------------------------------------------------------------------
+_MOCK_CAPACITY_ROWS = [
+    {
+        "resource_type": "production", "resource": "PRESS-01", "location": "PLANT-A",
+        "product": "FG-100", "source": "PROD-SOURCE-1", "period": "2026-10",
+        "demand": 120.0, "usage": 120.0, "supply": 100.0,
+    },
+    {
+        "resource_type": "storage", "resource": "WH-A", "location": "PLANT-A",
+        "product": "FG-100", "source": None, "period": "2026-10",
+        "demand": 80.0, "usage": 75.0, "supply": 100.0,
+    },
+]
+
+def analyze_capacity_bottlenecks(
+    resource_type: str = "all",
+    resource: str | None = None,
+    location: str | None = None,
+    product: str | None = None,
+    period_start_rel: int = 0,
+    period_end_rel: int = 3,
+    utilization_threshold_pct: float = 80.0,
+) -> dict:
+    """Find IBP resource-period capacity shortages and high utilization."""
+    aliases = {
+        "handling": "handling", "handling resource": "handling",
+        "storage": "storage", "storage resource": "storage",
+        "production": "production", "production resource": "production",
+        "transportation": "transportation", "transport": "transportation",
+        "transportation resource": "transportation", "all": "all",
+    }
+    normalized_type = aliases.get(resource_type.strip().lower())
+    if normalized_type is None:
+        raise ValueError("resource_type must be handling, production, storage, transportation, or all")
+    if period_start_rel > period_end_rel:
+        raise ValueError("period_start_rel must not exceed period_end_rel")
+    if utilization_threshold_pct < 0:
+        raise ValueError("utilization_threshold_pct cannot be negative")
+
+    requested_types = list(CAPACITY_KEY_FIGURES) if normalized_type == "all" else [normalized_type]
+    rows = []
+    if USE_MOCK_DATA:
+        rows = [
+            row for row in _MOCK_CAPACITY_ROWS
+            if row["resource_type"] in requested_types
+            and (resource is None or row["resource"] == resource)
+            and (location is None or row["location"] == location)
+            and (product is None or row["product"] == product)
+        ]
+    else:
+        period_field = f"PERIODID{IBP_PERIOD_LEVEL}_REL"
+        timestamp_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
+        dimension_fields = [CAPACITY_RESOURCE_FIELD, "LOCID", "PRDID"]
+        if any(current_type in CAPACITY_SOURCE_TYPES for current_type in requested_types):
+            dimension_fields.append(CAPACITY_SOURCE_FIELD)
+        key_figure_fields = {
+            CAPACITY_SUPPLY_KEY_FIGURE,
+            *(field for current_type in requested_types for field in CAPACITY_KEY_FIGURES[current_type]),
+        }
+        # Relative period fields are valid filter properties for this service,
+        # but are not selectable properties in the Planning Data API.
+        select_fields = ",".join(dict.fromkeys(
+            dimension_fields + [timestamp_field] + sorted(key_figure_fields)
+        ))
+        filters = [
+            f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+            f"{period_field} ge {period_start_rel}",
+            f"{period_field} le {period_end_rel}",
+        ]
+        if resource:
+            filters.append(f"{CAPACITY_RESOURCE_FIELD} eq '{_display_id(resource)}'")
+        if location:
+            filters.append(f"LOCID eq '{_display_id(location)}'")
+        if product:
+            filters.append(f"PRDID eq '{_display_id(product)}'")
+        result = _ibp_get(select=select_fields, filter_=" and ".join(filters))
+        for raw in result.get("d", {}).get("results", []):
+            for current_type in requested_types:
+                demand_field, usage_field = CAPACITY_KEY_FIGURES[current_type]
+                def number(field: str) -> float | None:
+                    value = raw.get(field)
+                    if value is None or str(value).strip() == "":
+                        return None
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        return None
+                rows.append({
+                    "resource_type": current_type,
+                    "resource": raw.get(CAPACITY_RESOURCE_FIELD),
+                    "location": raw.get("LOCID"),
+                    "product": raw.get("PRDID"),
+                    "source": raw.get(CAPACITY_SOURCE_FIELD),
+                    "period": _period_month(raw.get(timestamp_field)),
+                    "demand": number(demand_field),
+                    "usage": number(usage_field),
+                    "supply": number(CAPACITY_SUPPLY_KEY_FIGURE),
+                })
+
+    results = []
+    for row in rows:
+        supply = row["supply"]
+        usage = row["usage"]
+        demand = row["demand"]
+        required_values_present = all(
+            value is not None for value in (demand, usage, supply)
+        )
+        utilization = usage / supply * 100 if required_values_present and supply > 0 else None
+        shortage = max(0.0, demand - supply) if required_values_present else None
+        results.append({
+            **row,
+            "shortage": round(shortage, 2) if shortage is not None else None,
+            "headroom": round(supply - usage, 2) if required_values_present else None,
+            "utilization_pct": round(utilization, 2) if utilization is not None else None,
+            "status": (
+                "data_unavailable" if not required_values_present
+                else "shortage" if shortage > 0
+                else "high_utilization" if utilization is not None and utilization >= utilization_threshold_pct
+                else "within_capacity"
+            ),
+        })
+    results.sort(key=lambda item: (item["shortage"] or 0, item["utilization_pct"] or 0), reverse=True)
+    missing_value_count = sum(
+        1 for item in results
+        if item["status"] == "data_unavailable"
+    )
+    activity_row_count = sum(
+        1 for item in results
+        if (item["demand"] or 0) != 0 or (item["usage"] or 0) != 0
+    )
+    if missing_value_count:
+        analysis_status = "incomplete_data"
+        data_quality_warning = (
+            "One or more capacity rows are missing demand, usage, or supply values; "
+            "bottleneck conclusions are incomplete."
+        )
+    elif results and activity_row_count == 0:
+        analysis_status = "no_activity_data"
+        data_quality_warning = (
+            "All returned demand and usage values are zero. This may indicate no "
+            "capacity activity or that the capacity key figures are not populated "
+            "at this planning level."
+        )
+    else:
+        analysis_status = "complete"
+        data_quality_warning = None
+    return {
+        "resource_type": normalized_type,
+        "key_figures": {
+            current_type: {
+                "demand": CAPACITY_KEY_FIGURES[current_type][0],
+                "usage": CAPACITY_KEY_FIGURES[current_type][1],
+                "supply": CAPACITY_SUPPLY_KEY_FIGURE,
+            }
+            for current_type in requested_types
+        },
+        "filters": {
+            "resource": resource, "location": location, "product": product,
+            "period_start_rel": period_start_rel, "period_end_rel": period_end_rel,
+            "utilization_threshold_pct": utilization_threshold_pct,
+        },
+        "total_rows_evaluated": len(results),
+        "analysis_status": analysis_status,
+        "data_quality_warning": data_quality_warning,
+        "activity_row_count": activity_row_count,
+        "missing_value_count": missing_value_count,
+        "bottleneck_count": sum(
+            item["status"] in {"shortage", "high_utilization"} for item in results
+        ),
+        "shortage_count": sum(item["status"] == "shortage" for item in results),
+        "bottlenecks": [
+            item for item in results
+            if item["status"] in {"shortage", "high_utilization"}
+        ],
+        "results": results,
+    }
+
+# ---------------------------------------------------------------------------
+# 3. Detect Anomaly in Forecast Pattern
 # ---------------------------------------------------------------------------
 _MOCK_STATISTICAL_FORECAST = {
     "B1": [1000, 1050, 4200, 1100, 1080, 1120],  # spike in month 3
