@@ -796,11 +796,64 @@ def analyze_capacity_bottlenecks(
     if utilization_threshold_pct < 0:
         raise ValueError("utilization_threshold_pct cannot be negative")
 
-    requested_types = list(CAPACITY_KEY_FIGURES) if normalized_type == "all" else [normalized_type]
-    requested_types = [
-        current_type for current_type in requested_types
-        if not (current_type == "transportation" and (not CAPACITY_SHIP_FROM_FIELD or not CAPACITY_MODE_FIELD))
-    ]
+    if normalized_type == "all":
+        all_results = []
+        total_rows_evaluated = 0
+        for current_type in CAPACITY_KEY_FIGURES:
+            if current_type == "transportation" and (not CAPACITY_SHIP_FROM_FIELD or not CAPACITY_MODE_FIELD):
+                continue
+            current_result = analyze_capacity_bottlenecks(
+                resource_type=current_type,
+                resource=resource,
+                location=location,
+                product=product,
+                period_start_rel=period_start_rel,
+                period_end_rel=period_end_rel,
+                utilization_threshold_pct=utilization_threshold_pct,
+            )
+            all_results.extend(current_result.get("results", []))
+            total_rows_evaluated += current_result.get("total_rows_evaluated", 0)
+        combined = {
+            "resource_type": "all",
+            "key_figures": {
+                current_type: {
+                    "demand": CAPACITY_KEY_FIGURES[current_type][0],
+                    "usage": CAPACITY_KEY_FIGURES[current_type][1],
+                    "supply": CAPACITY_SUPPLY_KEY_FIGURE,
+                    "consumption_rate": CAPACITY_RATE_KEY_FIGURES[current_type],
+                }
+                for current_type in CAPACITY_KEY_FIGURES
+                if not (current_type == "transportation" and (not CAPACITY_SHIP_FROM_FIELD or not CAPACITY_MODE_FIELD))
+            },
+            "planning_levels": {
+                "handling": ["resource", "location", "product"],
+                "storage": ["resource", "location", "product"],
+                "production": ["resource", "location", "product", "source_id"],
+                "transportation": [
+                    "product", "location", "ship_from_location",
+                    "mode_of_transport", "resource",
+                ],
+                "capacity_supply": ["resource", "location"],
+            },
+            "filters": {
+                "resource": resource, "location": location, "product": product,
+                "period_start_rel": period_start_rel, "period_end_rel": period_end_rel,
+                "utilization_threshold_pct": utilization_threshold_pct,
+            },
+            "total_rows_evaluated": total_rows_evaluated,
+            "resource_period_count": len(all_results),
+            "analysis_status": "complete" if all_results else "no_activity_data",
+            "data_quality_warning": None,
+            "activity_row_count": sum(1 for item in all_results if (item.get("demand") or 0) != 0 or (item.get("usage") or 0) != 0),
+            "missing_value_count": 0,
+            "bottleneck_count": sum(item["status"] in {"shortage", "high_utilization"} for item in all_results),
+            "shortage_count": sum(item["status"] == "shortage" for item in all_results),
+            "bottlenecks": [item for item in all_results if item["status"] in {"shortage", "high_utilization"}],
+            "results": all_results,
+        }
+        return combined
+
+    requested_types = [normalized_type]
     rows = []
     if USE_MOCK_DATA:
         rows = [
@@ -852,6 +905,13 @@ def analyze_capacity_bottlenecks(
             for current_type in requested_types:
                 demand_field, usage_field = CAPACITY_KEY_FIGURES[current_type]
                 rate_field = CAPACITY_RATE_KEY_FIGURES[current_type]
+                raw_has_type_data = any(
+                    raw.get(field) is not None and str(raw.get(field)).strip() != ""
+                    for field in (demand_field, usage_field, rate_field)
+                )
+                if not raw_has_type_data:
+                    continue
+
                 def number(field: str) -> float | None:
                     value = raw.get(field)
                     if value is None or str(value).strip() == "":
@@ -978,6 +1038,7 @@ def analyze_capacity_bottlenecks(
                 "demand", "usage", "supply",
             )
         } | {
+            "capacity": group["supply"],
             "shortage": round(shortage, 2) if shortage is not None else None,
             "headroom": round(supply - usage, 2) if required_values_present else None,
             "utilization_pct": round(utilization, 2) if utilization is not None else None,
