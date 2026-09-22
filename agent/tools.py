@@ -29,7 +29,7 @@ USE_MOCK_DATA = os.environ.get("USE_MOCK_DATA", "true").lower() == "true"
 IBP_BASE_URL = os.environ.get("IBP_BASE_URL", "")
 IBP_USER = os.environ.get("IBP_USER", "")
 IBP_PASSWORD = os.environ.get("IBP_PASSWORD", "")
-IBP_PLANNING_AREA = os.environ.get("IBP_PLANNING_AREA", "YCIBP1")
+IBP_PLANNING_AREA = os.environ.get("IBP_PLANNING_AREA", "ZJPIBP1")
 IBP_PERIOD_LEVEL = os.environ.get("IBP_PERIOD_LEVEL", "3")
 IBP_UOM_TO_ID = os.environ.get("IBP_UOM_TO_ID", "EA")
 IBP_KEY_FIGURE = os.environ.get("IBP_KEY_FIGURE", "STATISTICALFORECASTQTY")
@@ -42,12 +42,27 @@ CAPACITY_KEY_FIGURES = {
     "production": ("PCAPADEMAND", "PCAPAUSAGE"),
     "transportation": ("TCAPADEMAND", "TCAPAUSAGE"),
 }
+CAPACITY_RATE_KEY_FIGURES = {
+    "handling": "CAPACONSUMPTION",
+    "storage": "CAPACONSUMPTION",
+    "production": "PCAPACONSUMPTION",
+    "transportation": "TCAPACONSUMPTION",
+}
+CAPACITY_UTILIZATION_FIELD_CANDIDATES = {
+    "handling": (os.environ.get("IBP_CAPACITY_UTILIZATION_FIELD") or "UTILIZATIONPCT",),
+    "storage": (os.environ.get("IBP_CAPACITY_UTILIZATION_FIELD") or "UTILIZATIONPCT",),
+    "production": (os.environ.get("IBP_CAPACITY_UTILIZATION_FIELD") or "UTILIZATIONPCT",),
+    "transportation": (os.environ.get("IBP_CAPACITY_UTILIZATION_FIELD") or "UTILIZATIONPCT",),
+}
 CAPACITY_SUPPLY_KEY_FIGURE = "CAPASUPPLY"
 CAPACITY_RESOURCE_FIELD = os.environ.get("IBP_CAPACITY_RESOURCE_FIELD", "RESID")
 CAPACITY_SOURCE_FIELD = os.environ.get("IBP_CAPACITY_SOURCE_FIELD", "SOURCEID")
+CAPACITY_SHIP_FROM_FIELD = os.environ.get("IBP_CAPACITY_SHIP_FROM_FIELD") or ""
+CAPACITY_MODE_FIELD = os.environ.get("IBP_CAPACITY_MODE_FIELD") or ""
+CAPACITY_TRANSPORT_SUPPLY_LOCATION = os.environ.get("IBP_CAPACITY_TRANSPORT_SUPPLY_LOCATION") or ""
 CAPACITY_SOURCE_TYPES = {
     value.strip().lower()
-    for value in os.environ.get("IBP_CAPACITY_SOURCE_TYPES", "production,transportation").split(",")
+    for value in os.environ.get("IBP_CAPACITY_SOURCE_TYPES", "production").split(",")
     if value.strip()
 }
 IBP_NAVIGATION_PROPERTY = os.environ.get(
@@ -745,12 +760,14 @@ _MOCK_CAPACITY_ROWS = [
     {
         "resource_type": "production", "resource": "PRESS-01", "location": "PLANT-A",
         "product": "FG-100", "source": "PROD-SOURCE-1", "period": "2026-10",
-        "demand": 120.0, "usage": 120.0, "supply": 100.0,
+        "supply_location": "PLANT-A", "ship_from_location": None, "mode_of_transport": None,
+        "consumption_rate": 1.0, "is_supply_row": False, "demand": 120.0, "usage": 120.0, "supply": 100.0,
     },
     {
         "resource_type": "storage", "resource": "WH-A", "location": "PLANT-A",
         "product": "FG-100", "source": None, "period": "2026-10",
-        "demand": 80.0, "usage": 75.0, "supply": 100.0,
+        "supply_location": "PLANT-A", "ship_from_location": None, "mode_of_transport": None,
+        "consumption_rate": 1.0, "is_supply_row": False, "demand": 80.0, "usage": 75.0, "supply": 100.0,
     },
 ]
 
@@ -780,6 +797,10 @@ def analyze_capacity_bottlenecks(
         raise ValueError("utilization_threshold_pct cannot be negative")
 
     requested_types = list(CAPACITY_KEY_FIGURES) if normalized_type == "all" else [normalized_type]
+    requested_types = [
+        current_type for current_type in requested_types
+        if not (current_type == "transportation" and (not CAPACITY_SHIP_FROM_FIELD or not CAPACITY_MODE_FIELD))
+    ]
     rows = []
     if USE_MOCK_DATA:
         rows = [
@@ -795,9 +816,15 @@ def analyze_capacity_bottlenecks(
         dimension_fields = [CAPACITY_RESOURCE_FIELD, "LOCID", "PRDID"]
         if any(current_type in CAPACITY_SOURCE_TYPES for current_type in requested_types):
             dimension_fields.append(CAPACITY_SOURCE_FIELD)
+        if "transportation" in requested_types and CAPACITY_SHIP_FROM_FIELD and CAPACITY_MODE_FIELD:
+            dimension_fields.extend([CAPACITY_SHIP_FROM_FIELD, CAPACITY_MODE_FIELD])
         key_figure_fields = {
             CAPACITY_SUPPLY_KEY_FIGURE,
-            *(field for current_type in requested_types for field in CAPACITY_KEY_FIGURES[current_type]),
+            *(field for current_type in requested_types for field in (
+                *CAPACITY_KEY_FIGURES[current_type],
+                CAPACITY_RATE_KEY_FIGURES[current_type],
+                *CAPACITY_UTILIZATION_FIELD_CANDIDATES.get(current_type, ()),
+            )),
         }
         # Relative period fields are valid filter properties for this service,
         # but are not selectable properties in the Planning Data API.
@@ -811,14 +838,20 @@ def analyze_capacity_bottlenecks(
         ]
         if resource:
             filters.append(f"{CAPACITY_RESOURCE_FIELD} eq '{_display_id(resource)}'")
-        if location:
+        if location and "transportation" not in requested_types:
             filters.append(f"LOCID eq '{_display_id(location)}'")
+        elif location and "transportation" in requested_types:
+            filters.append(
+                f"(LOCID eq '{CAPACITY_TRANSPORT_SUPPLY_LOCATION}' or "
+                f"LOCID eq '{_display_id(location)}')"
+            )
         if product:
             filters.append(f"PRDID eq '{_display_id(product)}'")
         result = _ibp_get(select=select_fields, filter_=" and ".join(filters))
         for raw in result.get("d", {}).get("results", []):
             for current_type in requested_types:
                 demand_field, usage_field = CAPACITY_KEY_FIGURES[current_type]
+                rate_field = CAPACITY_RATE_KEY_FIGURES[current_type]
                 def number(field: str) -> float | None:
                     value = raw.get(field)
                     if value is None or str(value).strip() == "":
@@ -827,30 +860,124 @@ def analyze_capacity_bottlenecks(
                         return float(value)
                     except (TypeError, ValueError):
                         return None
+                raw_location = raw.get("LOCID")
+                is_transport_supply_row = (
+                    current_type == "transportation"
+                    and raw_location == CAPACITY_TRANSPORT_SUPPLY_LOCATION
+                )
+                utilization_candidates = CAPACITY_UTILIZATION_FIELD_CANDIDATES.get(current_type, ("UTILIZATIONPCT",))
+                utilization_pct = None
+                for candidate in utilization_candidates:
+                    candidate_value = raw.get(candidate)
+                    if candidate_value is None or str(candidate_value).strip() == "":
+                        continue
+                    try:
+                        utilization_pct = float(candidate_value)
+                        break
+                    except (TypeError, ValueError):
+                        continue
                 rows.append({
                     "resource_type": current_type,
                     "resource": raw.get(CAPACITY_RESOURCE_FIELD),
-                    "location": raw.get("LOCID"),
+                    "location": None if is_transport_supply_row else raw_location,
+                    "supply_location": (
+                        CAPACITY_TRANSPORT_SUPPLY_LOCATION
+                        if current_type == "transportation" else raw_location
+                    ),
                     "product": raw.get("PRDID"),
                     "source": raw.get(CAPACITY_SOURCE_FIELD),
+                    "ship_from_location": raw.get(CAPACITY_SHIP_FROM_FIELD),
+                    "mode_of_transport": raw.get(CAPACITY_MODE_FIELD),
                     "period": _period_month(raw.get(timestamp_field)),
                     "demand": number(demand_field),
                     "usage": number(usage_field),
                     "supply": number(CAPACITY_SUPPLY_KEY_FIGURE),
+                    "utilization_pct": utilization_pct,
+                    "consumption_rate": number(rate_field),
+                    "is_supply_row": is_transport_supply_row,
                 })
 
-    results = []
+    grouped = {}
     for row in rows:
-        supply = row["supply"]
-        usage = row["usage"]
-        demand = row["demand"]
-        required_values_present = all(
-            value is not None for value in (demand, usage, supply)
+        group_location = None if row["resource_type"] == "transportation" else row["location"]
+        group_key = (
+            row["resource_type"],
+            row["resource"],
+            group_location,
+            row["product"],
+            row["source"] if row["resource_type"] == "production" else None,
+            row["ship_from_location"] if row["resource_type"] == "transportation" else None,
+            row["mode_of_transport"] if row["resource_type"] == "transportation" else None,
+            row["period"],
         )
-        utilization = usage / supply * 100 if required_values_present and supply > 0 else None
+        group = grouped.setdefault(
+            group_key,
+            {
+                "resource_type": row["resource_type"],
+                "resource": row["resource"],
+                "location": group_location,
+                "product": row["product"],
+                "period": row["period"],
+                "source": row["source"] if row["resource_type"] == "production" else None,
+                "supply_location": row["supply_location"],
+                "ship_from_location": row["ship_from_location"] if row["resource_type"] == "transportation" else None,
+                "mode_of_transport": row["mode_of_transport"] if row["resource_type"] == "transportation" else None,
+                "demand": 0.0,
+                "usage": 0.0,
+                "supply": row["supply"],
+                "utilization_pct": row.get("utilization_pct"),
+                "contributors": [],
+                "missing_demand": False,
+                "missing_usage": False,
+                "missing_supply": row["supply"] is None,
+            },
+        )
+        if row["demand"] is None and not row["is_supply_row"]:
+            group["missing_demand"] = True
+        elif row["demand"] is not None:
+            group["demand"] += row["demand"]
+        if row["usage"] is None and not row["is_supply_row"]:
+            group["missing_usage"] = True
+        elif row["usage"] is not None:
+            group["usage"] += row["usage"]
+        if group["supply"] is None and row["supply"] is not None:
+            group["supply"] = row["supply"]
+            group["missing_supply"] = False
+        utilization_value = row.get("utilization_pct")
+        if utilization_value is not None:
+            group["utilization_pct"] = utilization_value
+        if not row["is_supply_row"]:
+            group["contributors"].append(row)
+
+    results = []
+    for group in grouped.values():
+        supply = group["supply"]
+        usage = group["usage"]
+        demand = group["demand"]
+        required_values_present = not any(
+            (group["missing_demand"], group["missing_usage"], group["missing_supply"])
+        )
+        utilization_from_ibp = group.get("utilization_pct")
+        utilization = (
+            utilization_from_ibp
+            if utilization_from_ibp is not None
+            else (usage / supply * 100 if required_values_present and supply and supply > 0 else None)
+        )
         shortage = max(0.0, demand - supply) if required_values_present else None
+        contributors = sorted(
+            group["contributors"],
+            key=lambda item: (item["demand"] or 0, item["usage"] or 0),
+            reverse=True,
+        )
+        total_demand = sum(item["demand"] or 0 for item in contributors)
         results.append({
-            **row,
+            key: group[key]
+            for key in (
+                "resource_type", "resource", "location", "period", "source",
+                "supply_location", "ship_from_location", "mode_of_transport",
+                "demand", "usage", "supply",
+            )
+        } | {
             "shortage": round(shortage, 2) if shortage is not None else None,
             "headroom": round(supply - usage, 2) if required_values_present else None,
             "utilization_pct": round(utilization, 2) if utilization is not None else None,
@@ -860,6 +987,21 @@ def analyze_capacity_bottlenecks(
                 else "high_utilization" if utilization is not None and utilization >= utilization_threshold_pct
                 else "within_capacity"
             ),
+            "contributors": [
+                {
+                    "product": item["product"],
+                    "location": item["location"],
+                    "ship_from_location": item["ship_from_location"],
+                    "mode_of_transport": item["mode_of_transport"],
+                    "demand": item["demand"],
+                    "usage": item["usage"],
+                    "consumption_rate": item["consumption_rate"],
+                    "demand_share_pct": round(
+                        (item["demand"] or 0) / total_demand * 100, 2
+                    ) if total_demand else None,
+                }
+                for item in contributors[:10]
+            ],
         })
     results.sort(key=lambda item: (item["shortage"] or 0, item["utilization_pct"] or 0), reverse=True)
     missing_value_count = sum(
@@ -893,15 +1035,27 @@ def analyze_capacity_bottlenecks(
                 "demand": CAPACITY_KEY_FIGURES[current_type][0],
                 "usage": CAPACITY_KEY_FIGURES[current_type][1],
                 "supply": CAPACITY_SUPPLY_KEY_FIGURE,
+                "consumption_rate": CAPACITY_RATE_KEY_FIGURES[current_type],
             }
             for current_type in requested_types
+        },
+        "planning_levels": {
+            "handling": ["resource", "location", "product"],
+            "storage": ["resource", "location", "product"],
+            "production": ["resource", "location", "product", "source_id"],
+            "transportation": [
+                "product", "location", "ship_from_location",
+                "mode_of_transport", "resource",
+            ],
+            "capacity_supply": ["resource", "location"],
         },
         "filters": {
             "resource": resource, "location": location, "product": product,
             "period_start_rel": period_start_rel, "period_end_rel": period_end_rel,
             "utilization_threshold_pct": utilization_threshold_pct,
         },
-        "total_rows_evaluated": len(results),
+        "total_rows_evaluated": len(rows),
+        "resource_period_count": len(results),
         "analysis_status": analysis_status,
         "data_quality_warning": data_quality_warning,
         "activity_row_count": activity_row_count,
@@ -916,6 +1070,119 @@ def analyze_capacity_bottlenecks(
         ],
         "results": results,
     }
+
+def recommend_capacity_action(
+    resource_type: str,
+    resource: str,
+    location: str,
+    period: str,
+    shortage: float | None = None,
+    utilization_pct: float | None = None,
+    headroom: float | None = None,
+    contributors: list[dict] | None = None,
+) -> dict:
+    """Recommend a capacity response without changing SAP IBP data."""
+    normalized_type = resource_type.strip().lower()
+    if normalized_type == "transport":
+        normalized_type = "transportation"
+    if normalized_type not in CAPACITY_KEY_FIGURES:
+        raise ValueError("resource_type must be handling, production, storage, or transportation")
+    if not resource or not location or not period:
+        raise ValueError("resource, location, and period are required")
+    if shortage is not None and shortage < 0:
+        raise ValueError("shortage cannot be negative")
+    actions_by_type = {
+        "handling": [
+            "Check goods-receipt staffing and handling shifts for the affected period.",
+            "Review inbound scheduling and consolidate receipts where possible.",
+            "Evaluate temporary handling capacity or an alternate receiving location.",
+        ],
+        "storage": [
+            "Review inventory placement and transfer stock to an available warehouse.",
+            "Check whether excess inventory can be consumed, shipped, or rescheduled.",
+            "Evaluate storage capacity expansion and its penalty or operating cost.",
+        ],
+        "production": [
+            "Review the contributing products and reschedule production around the constrained period.",
+            "Evaluate an alternate production source or approved subcontracting option.",
+            "Consider capacity supply expansion and compare its cost with the shortage impact.",
+        ],
+        "transportation": [
+            "Review the contributing lanes and move volume to an available transportation source.",
+            "Reschedule shipments or consolidate loads within the affected period.",
+            "Evaluate transportation capacity expansion or an alternate carrier lane.",
+        ],
+    }
+    if shortage and shortage > 0:
+        priority = "urgent_capacity_shortage"
+        summary = f"{normalized_type.title()} capacity is short by {shortage:g} units in {period}."
+    elif utilization_pct is not None and utilization_pct >= 80:
+        priority = "high_utilization"
+        summary = f"{normalized_type.title()} capacity is highly utilized at {utilization_pct:g}% in {period}."
+    else:
+        priority = "monitor"
+        summary = f"{normalized_type.title()} capacity does not currently require an escalation in {period}."
+    return {
+        "resource_type": normalized_type,
+        "resource": resource,
+        "location": location,
+        "period": period,
+        "priority": priority,
+        "summary": summary,
+        "shortage": shortage,
+        "utilization_pct": utilization_pct,
+        "headroom": headroom,
+        "contributors": (contributors or [])[:10],
+        "actions": actions_by_type[normalized_type],
+        "requires_confirmation_for_change": True,
+        "data_changed": False,
+    }
+
+def update_capacity_supply(
+    resource: str,
+    location: str,
+    period: str,
+    supply: float,
+    resource_type: str = "production",
+    version: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Preview or import CAPASUPPLY at the IBP resource-location-period level."""
+    normalized_type = resource_type.strip().lower()
+    if normalized_type == "transport":
+        normalized_type = "transportation"
+    if normalized_type not in CAPACITY_KEY_FIGURES:
+        raise ValueError("resource_type must be handling, production, storage, or transportation")
+    if not resource or not location:
+        raise ValueError("resource and location are required")
+    if normalized_type == "transportation" and location != CAPACITY_TRANSPORT_SUPPLY_LOCATION:
+        raise ValueError(
+            f"transportation capacity supply must use location {CAPACITY_TRANSPORT_SUPPLY_LOCATION}"
+        )
+    if supply < 0:
+        raise ValueError("supply cannot be negative")
+    period_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
+    fields = [CAPACITY_RESOURCE_FIELD, "LOCID", CAPACITY_SUPPLY_KEY_FIGURE, period_field]
+    values = {
+        CAPACITY_RESOURCE_FIELD: _display_id(resource),
+        "LOCID": _display_id(location),
+        CAPACITY_SUPPLY_KEY_FIGURE: str(supply),
+        period_field: period,
+    }
+    result = update_planning_data(
+        aggregation_fields=fields,
+        aggregation_values=values,
+        version=version,
+        confirm=confirm,
+    )
+    result.update({
+        "resource_type": normalized_type,
+        "resource": resource,
+        "location": location,
+        "period": period,
+        "supply": supply,
+    })
+    return result
 
 # ---------------------------------------------------------------------------
 # 3. Detect Anomaly in Forecast Pattern

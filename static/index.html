@@ -95,13 +95,23 @@
       $('history-list').innerHTML=chats.length ? chats.map(chat=>`<button class="history-item" data-chat-id="${chat.id}">${chat.title.slice(0,58)}<small>${chat.updatedAt}</small></button>`).join('') : '<p class="empty">No recent conversations yet.</p>';
       document.querySelectorAll('[data-chat-id]').forEach(button=>button.addEventListener('click',()=>{ const chat=chats.find(item=>item.id===button.dataset.chatId); if (!chat) return; conversationId=chat.id; transcript.length=0; transcript.push(...chat.messages); localStorage.setItem('ibp-conversation-id',conversationId); localStorage.setItem('ibp-transcript',JSON.stringify(transcript)); $('chat').innerHTML=''; transcript.forEach(item=>appendMessage(item.role,item.text,false)); $('history-modal').classList.remove('open'); $('chat-drawer').classList.add('open'); }));
     }
+    function renderCapacity(data) {
+      $('chart-panel').classList.add('hidden');
+      const statusTone=data.analysis_status === 'complete' ? 'teal' : 'coral';
+      $('metrics').innerHTML=metric('Rows evaluated',data.total_rows_evaluated)+metric('Bottlenecks',data.bottleneck_count,'coral')+metric('Shortages',data.shortage_count,'coral')+metric('Activity rows',data.activity_row_count)+metric('Analysis status',data.analysis_status,statusTone);
+      $('alerts-panel').classList.remove('hidden');
+      const warning=data.data_quality_warning ? `<div class="notice">${escapeHtml(data.data_quality_warning)}</div>` : '';
+      const rows=(data.results || []).slice(0,50);
+      $('alerts').innerHTML=warning+`<table><thead><tr><th>Type</th><th>Resource</th><th>Location</th><th>Ship-from</th><th>Mode</th><th>Period</th><th>Supply</th><th>Demand</th><th>Usage</th><th>Utilization</th><th>Shortage</th><th>Headroom</th><th>Status</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${escapeHtml(row.resource_type)}</td><td>${escapeHtml(row.resource || '-')}</td><td>${escapeHtml(row.location || '-')}</td><td>${escapeHtml(row.ship_from_location || '-')}</td><td>${escapeHtml(row.mode_of_transport || '-')}</td><td>${escapeHtml(row.period || '-')}</td><td>${format(row.supply)}</td><td>${format(row.demand)}</td><td>${format(row.usage)}</td><td>${row.utilization_pct === null || row.utilization_pct === undefined ? 'N/A' : `${format(row.utilization_pct)}%`}</td><td>${format(row.shortage)}</td><td>${format(row.headroom)}</td><td>${escapeHtml(row.status || '-')}</td></tr>`).join('')}</tbody></table>`;
+    }
     function render(result, question) {
       appendMessage('user', question); appendMessage('agent', result.reply);
       conversationId=result.conversation_id; localStorage.setItem('ibp-conversation-id',conversationId);
       const insight=findData(result.insights || []), data=insight && insight.data;
       if (!data) { $('metrics').innerHTML=metric('No structured evidence returned','--'); return; }
       $('metrics').innerHTML='';
-      if (data.results) { const rows=data.results; const values=rows.map(r=>Number(r[data.metric] ?? r.actual ?? 0)); $('metrics').innerHTML=metric('Rows evaluated',data.total_rows_evaluated)+metric('Top value',Math.max(...values,0))+metric('Results shown',rows.length); if(rows.length){ $('chart-panel').classList.remove('hidden'); $('chart-title').textContent=`${data.metric} by ${data.group_by?.join(' / ') || 'result'}`; $('chart').innerHTML=renderBars(rows.map(r=>({product:r.product||r.period,forecast:r.forecast||r[data.metric],actual:r.actual||0}))); } }
+      if (data.key_figures && data.resource_type) { renderCapacity(data); }
+      else if (data.results) { const rows=data.results; const values=rows.map(r=>Number(r[data.metric] ?? r.actual ?? 0)); $('metrics').innerHTML=metric('Rows evaluated',data.total_rows_evaluated)+metric('Top value',Math.max(...values,0))+metric('Results shown',rows.length); if(rows.length){ $('chart-panel').classList.remove('hidden'); $('chart-title').textContent=`${data.metric} by ${data.group_by?.join(' / ') || 'result'}`; $('chart').innerHTML=renderBars(rows.map(r=>({product:r.product||r.period,forecast:r.forecast||r[data.metric],actual:r.actual||0}))); } }
       else if (data.alert_results) { $('metrics').innerHTML=metric('Rows checked',data.count)+metric('Alerts',data.alert_count,'coral')+metric('Threshold',`${data.threshold_pct}%`); renderAlerts(data.alert_results); }
       else if (data.anomalies) { $('metrics').innerHTML=metric('Anomalies found',data.anomaly_count,data.anomaly_count?'coral':'teal')+metric('Scope',data.result_scope); renderAlerts(data.anomalies.map(a=>({product:a.product_id,type:a.type,period:a.period||a.period_start||'-',variance_pct:a.pct_change||a.value||'-'}))); }
       else if (data.ready !== undefined) { $('metrics').innerHTML=metric('Ready',data.ready?'YES':'NO',data.ready?'teal':'coral')+metric('Last loaded',data.last_loaded_period||'-')+metric('Missing periods',data.missing_periods?.length||0,'coral'); }
