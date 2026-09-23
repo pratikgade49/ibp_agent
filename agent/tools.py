@@ -34,13 +34,14 @@ IBP_PERIOD_LEVEL = os.environ.get("IBP_PERIOD_LEVEL", "3")
 IBP_UOM_TO_ID = os.environ.get("IBP_UOM_TO_ID", "EA")
 IBP_KEY_FIGURE = os.environ.get("IBP_KEY_FIGURE", "STATISTICALFORECASTQTY")
 IBP_TRANSACTION_NAME = os.environ.get("IBP_TRANSACTION_NAME", "IBP Demand Agent")
-# Standard IBP capacity key figures. Their names remain fixed vocabulary for
-# natural-language matching, while planning-area dimensions are configurable.
+# Standard IBP capacity key figures. In the UI and metadata, the demand field is
+# DEPENDENTDEMAND and the supply field is SUPPLY. Planning-area dimensions remain
+# configurable for each tenant.
 CAPACITY_KEY_FIGURES = {
-    "handling": ("CAPADEMAND", "CAPAUSAGE"),
-    "storage": ("CAPADEMAND", "CAPAUSAGE"),
-    "production": ("PCAPADEMAND", "PCAPAUSAGE"),
-    "transportation": ("TCAPADEMAND", "TCAPAUSAGE"),
+    "handling": ("DEPENDENTDEMAND", "PCAPAUSAGE"),
+    "storage": ("DEPENDENTDEMAND", "PCAPAUSAGE"),
+    "production": ("DEPENDENTDEMAND", "PCAPAUSAGE"),
+    "transportation": ("DEPENDENTDEMAND", "PCAPAUSAGE"),
 }
 CAPACITY_RATE_KEY_FIGURES = {
     "handling": "CAPACONSUMPTION",
@@ -813,6 +814,60 @@ def analyze_capacity_bottlenecks(
             )
             all_results.extend(current_result.get("results", []))
             total_rows_evaluated += current_result.get("total_rows_evaluated", 0)
+
+        def dedupe_key(item: dict) -> tuple:
+            canonical_type = item.get("resource_type")
+            if canonical_type in {"handling", "storage"}:
+                canonical_type = "handling"
+            return (
+                canonical_type,
+                item.get("resource"),
+                item.get("location"),
+                item.get("product"),
+                item.get("source"),
+                item.get("ship_from_location"),
+                item.get("mode_of_transport"),
+                item.get("period"),
+            )
+
+        deduped = []
+        seen = set()
+        for item in all_results:
+            key = dedupe_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+
+        if resource is not None and len(deduped) > 1:
+            merged = {
+                "resource_type": "all",
+                "resource": resource,
+                "location": deduped[0].get("location"),
+                "period": deduped[0].get("period"),
+                "source": next((item.get("source") for item in deduped if item.get("source") is not None), None),
+                "supply_location": next((item.get("supply_location") for item in deduped if item.get("supply_location") is not None), None),
+                "ship_from_location": next((item.get("ship_from_location") for item in deduped if item.get("ship_from_location") is not None), None),
+                "mode_of_transport": next((item.get("mode_of_transport") for item in deduped if item.get("mode_of_transport") is not None), None),
+                "demand": sum(item.get("demand") or 0 for item in deduped),
+                "usage": sum(item.get("usage") or 0 for item in deduped),
+                "supply": max((item.get("supply") for item in deduped if item.get("supply") is not None), default=None),
+                "contributors": [
+                    contributor
+                    for item in deduped
+                    for contributor in item.get("contributors", [])
+                ][:10],
+            }
+            merged["shortage"] = round(max(0.0, merged["demand"] - merged["supply"]), 2) if merged["supply"] is not None else None
+            merged["headroom"] = round(merged["supply"] - merged["usage"], 2) if merged["supply"] is not None else None
+            merged["utilization_pct"] = round((merged["usage"] / merged["supply"] * 100), 2) if merged["supply"] and merged["supply"] > 0 else None
+            merged["status"] = (
+                "shortage" if merged["shortage"] and merged["shortage"] > 0
+                else "high_utilization" if merged["utilization_pct"] is not None and merged["utilization_pct"] >= utilization_threshold_pct
+                else "within_capacity"
+            )
+            deduped = [merged]
+
         combined = {
             "resource_type": "all",
             "key_figures": {
@@ -841,15 +896,15 @@ def analyze_capacity_bottlenecks(
                 "utilization_threshold_pct": utilization_threshold_pct,
             },
             "total_rows_evaluated": total_rows_evaluated,
-            "resource_period_count": len(all_results),
-            "analysis_status": "complete" if all_results else "no_activity_data",
+            "resource_period_count": len(deduped),
+            "analysis_status": "complete" if deduped else "no_activity_data",
             "data_quality_warning": None,
-            "activity_row_count": sum(1 for item in all_results if (item.get("demand") or 0) != 0 or (item.get("usage") or 0) != 0),
+            "activity_row_count": sum(1 for item in deduped if (item.get("demand") or 0) != 0 or (item.get("usage") or 0) != 0),
             "missing_value_count": 0,
-            "bottleneck_count": sum(item["status"] in {"shortage", "high_utilization"} for item in all_results),
-            "shortage_count": sum(item["status"] == "shortage" for item in all_results),
-            "bottlenecks": [item for item in all_results if item["status"] in {"shortage", "high_utilization"}],
-            "results": all_results,
+            "bottleneck_count": sum(item["status"] in {"shortage", "high_utilization"} for item in deduped),
+            "shortage_count": sum(item["status"] == "shortage" for item in deduped),
+            "bottlenecks": [item for item in deduped if item["status"] in {"shortage", "high_utilization"}],
+            "results": deduped,
         }
         return combined
 
@@ -1038,15 +1093,13 @@ def analyze_capacity_bottlenecks(
                 "demand", "usage", "supply",
             )
         } | {
-            "capacity": group["supply"],
             "shortage": round(shortage, 2) if shortage is not None else None,
             "headroom": round(supply - usage, 2) if required_values_present else None,
             "utilization_pct": round(utilization, 2) if utilization is not None else None,
             "status": (
                 "data_unavailable" if not required_values_present
-                else "shortage" if shortage > 0
-                else "high_utilization" if utilization is not None and utilization >= utilization_threshold_pct
-                else "within_capacity"
+                else "High_Utilization" if utilization is not None and utilization > 100
+                else "Within_Capacity"
             ),
             "contributors": [
                 {
@@ -1065,6 +1118,33 @@ def analyze_capacity_bottlenecks(
             ],
         })
     results.sort(key=lambda item: (item["shortage"] or 0, item["utilization_pct"] or 0), reverse=True)
+    if resource is not None and len(results) > 1:
+        merged = {
+            "resource_type": "all",
+            "resource": resource,
+            "location": results[0].get("location"),
+            "period": results[0].get("period"),
+            "source": next((item.get("source") for item in results if item.get("source") is not None), None),
+            "supply_location": next((item.get("supply_location") for item in results if item.get("supply_location") is not None), None),
+            "ship_from_location": next((item.get("ship_from_location") for item in results if item.get("ship_from_location") is not None), None),
+            "mode_of_transport": next((item.get("mode_of_transport") for item in results if item.get("mode_of_transport") is not None), None),
+            "demand": sum(item.get("demand") or 0 for item in results),
+            "usage": sum(item.get("usage") or 0 for item in results),
+            "supply": max((item.get("supply") for item in results if item.get("supply") is not None), default=None),
+            "contributors": [
+                contributor
+                for item in results
+                for contributor in item.get("contributors", [])
+            ][:10],
+        }
+        merged["shortage"] = round(max(0.0, merged["demand"] - merged["supply"]), 2) if merged["supply"] is not None else None
+        merged["headroom"] = round(merged["supply"] - merged["usage"], 2) if merged["supply"] is not None else None
+        merged["utilization_pct"] = round((merged["usage"] / merged["supply"] * 100), 2) if merged["supply"] and merged["supply"] > 0 else None
+        merged["status"] = (
+            "High_Utilization" if merged["utilization_pct"] is not None and merged["utilization_pct"] > 100
+            else "Within_Capacity"
+        )
+        results = [merged]
     missing_value_count = sum(
         1 for item in results
         if item["status"] == "data_unavailable"
@@ -1122,12 +1202,12 @@ def analyze_capacity_bottlenecks(
         "activity_row_count": activity_row_count,
         "missing_value_count": missing_value_count,
         "bottleneck_count": sum(
-            item["status"] in {"shortage", "high_utilization"} for item in results
+            item["status"] == "High_Utilization" for item in results
         ),
         "shortage_count": sum(item["status"] == "shortage" for item in results),
         "bottlenecks": [
             item for item in results
-            if item["status"] in {"shortage", "high_utilization"}
+            if item["status"] == "High_Utilization"
         ],
         "results": results,
     }
@@ -1208,7 +1288,7 @@ def update_capacity_supply(
     version: str | None = None,
     confirm: bool = False,
 ) -> dict:
-    """Preview or import CAPASUPPLY at the IBP resource-location-period level."""
+    """Preview or import SUPPLY at the IBP resource-location-period level."""
     normalized_type = resource_type.strip().lower()
     if normalized_type == "transport":
         normalized_type = "transportation"

@@ -35,13 +35,14 @@ order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
 For capacity questions, use analyze_capacity_bottlenecks. Match natural-language
 resource terms such as production, storage, handling, transport, or all to the
-resource_type argument. The tool uses IBP key figures CAPADEMAND/CAPAUSAGE for
-handling and storage, PCAPADEMAND/PCAPAUSAGE for production,
-TCAPADEMAND/TCAPAUSAGE for transportation, and CAPASUPPLY for capacity supply.
+resource_type argument. The tool uses IBP key figures DEPENDENTDEMAND for
+demand, PCAPAUSAGE for handling/storage, PCAPAUSAGE for production, and
+PCAPAUSAGE for transportation capacity usage, with CAPASUPPLY as the
+capacity-supply key figure.
 Use CAPACONSUMPTION for handling/storage, PCAPACONSUMPTION for production,
-and TCAPACONSUMPTION for transportation when explaining capacity demand.
-Handling and storage are resource-location-product analyses; production is
-resource-location-product-source; transportation is product-location-
+and TCAPACONSUMPTION for transportation when explaining the capacity demand
+rate. Handling and storage are resource-location-product analyses; production
+is resource-location-product-source; transportation is product-location-
 ship-from-location-mode-of-transport-resource. For transportation capacity
 supply, IBP requires the location ID TransResLoc. Production and transportation
 are hard constraints in the time-series optimizer; storage is pseudo-hard, and
@@ -50,21 +51,23 @@ resource is supported by an algorithm unless the returned configuration or
 user-provided context confirms it.
 Capacity questions may be phrased as: "Which resources are bottlenecks in the
 next three periods?", "Show production capacity shortages", "Which warehouses
-are above 80 percent utilization?", "Is handling capacity sufficient?", or
-"Which transport resources have no headroom?". Use period_start_rel=1 and
-period_end_rel=3 for the next three periods when the user says next three
-periods. Use utilization_threshold_pct when the user gives a percentage.
-Report shortage, utilization, headroom, period, resource, location, product,
-and production source when present. Do not invent resource IDs or capacity
-values. If analysis_status is no_activity_data, explain that all returned
-demand and usage values are zero and do not claim that capacity is confirmed
-within limits. If analysis_status is incomplete_data, report the warning and do
-not present the result as a complete bottleneck assessment. This analysis is
-read-only; call recommend_capacity_action for a resolution proposal, and never
-write capacity changes without a separate explicit confirmation workflow. To
-change CAPASUPPLY, call update_capacity_supply only after the user confirms the
-exact resource, location, period, resource type, and new supply value. For
-transportation, the location must be TransResLoc.
+are above 80 percent utilization?", or "Is handling capacity sufficient?"
+Use period_start_rel=1 and period_end_rel=3 for the next three periods when the
+user says next three periods. Use utilization_threshold_pct when the user gives
+a percentage.
+Report utilization, period, resource, location, product, and production source
+when present. Use the IBP formula CAPASUPPLY / PCAPAUSAGE * 100 =
+UTILIZATIONPCT, and set status to High_Utilization when UTILIZATIONPCT > 100,
+otherwise Within_Capacity. Do not invent resource IDs or capacity values. If
+analysis_status is no_activity_data, explain that all returned demand and usage
+values are zero and do not claim that capacity is confirmed within limits. If
+analysis_status is incomplete_data, report the warning and do not present the
+result as a complete bottleneck assessment. This analysis is read-only; call
+recommend_capacity_action for a resolution proposal, and never write capacity
+changes without a separate explicit confirmation workflow. To change SUPPLY,
+call update_capacity_supply only after the user confirms the exact resource,
+location, period, resource type, and new supply value. For transportation, the
+location must be TransResLoc.
 Use query_planning_data for generic questions involving totals, rankings, \
 maximums, minimums, averages, comparisons, or base planning-level results. \
 For base planning level, group by product, location, customer, and period \
@@ -122,7 +125,7 @@ TOOL_REGISTRY = {
 TOOL_SCHEMAS = [
    {
        "name": "analyze_capacity_bottlenecks",
-    "description": "Analyze SAP IBP capacity bottlenecks. Use resource_type='production' for PCAPADEMAND/PCAPAUSAGE, 'storage' or 'handling' for CAPADEMAND/CAPAUSAGE, 'transportation' for TCAPADEMAND/TCAPAUSAGE, or 'all'. Match terms like production capacity, warehouse/storage capacity, goods-receipt/handling capacity, and transport capacity. Returns demand, usage, CAPASUPPLY, consumption rate, shortage, headroom, utilization, planning-level contributors, and affected dimensions. Transportation supply uses the IBP TransResLoc location.",
+    "description": "Analyze SAP IBP capacity bottlenecks. Use resource_type='production' for DEPENDENTDEMAND/PCAPAUSAGE, 'storage' or 'handling' for DEPENDENTDEMAND/PCAPAUSAGE, 'transportation' for TDEPENDENTDEMAND/PCAPAUSAGE, or 'all'. Match terms like production capacity, warehouse/storage capacity, goods-receipt/handling capacity, and transport capacity. Returns demand, usage, CAPASUPPLY, consumption rate, shortage, headroom, utilization, planning-level contributors, and affected dimensions. Transportation supply uses the IBP TransResLoc location.",
        "input_schema": {
            "type": "object",
            "properties": {
@@ -139,7 +142,7 @@ TOOL_SCHEMAS = [
    },
    {
        "name": "recommend_capacity_action",
-       "description": "Recommend next actions for an IBP handling, storage, production, or transportation capacity issue. This tool is read-only and never changes SAP IBP data. Call it after analyzing a specific bottleneck and pass its resource, location, period, shortage, utilization, headroom, and top contributors.",
+       "description": "Recommend next actions for an IBP handling, storage, production, or transportation capacity issue. This tool is read-only and never changes SAP IBP data. Call it after analyzing a specific bottleneck and pass its resource, location, period, shortage, utilization, and top contributors.",
        "input_schema": {
            "type": "object",
            "properties": {
@@ -149,7 +152,6 @@ TOOL_SCHEMAS = [
                "period": {"type": "string", "description": "Planning period returned by the analysis"},
                "shortage": {"type": "number"},
                "utilization_pct": {"type": "number"},
-               "headroom": {"type": "number"},
                "contributors": {"type": "array", "items": {"type": "object"}},
            },
            "required": ["resource_type", "resource", "location", "period"],
@@ -157,7 +159,7 @@ TOOL_SCHEMAS = [
    },
    {
        "name": "update_capacity_supply",
-       "description": "Preview or update SAP IBP CAPASUPPLY at resource-location-period level. Always call with confirm=false first and ask for explicit confirmation of the exact resource, location, period, resource type, and supply value. Call with confirm=true only after clear confirmation. Transportation supply must use location TransResLoc.",
+       "description": "Preview or update SAP IBP SUPPLY at resource-location-period level. Always call with confirm=false first and ask for explicit confirmation of the exact resource, location, period, resource type, and supply value. Call with confirm=true only after clear confirmation. Transportation supply must use location TransResLoc.",
        "input_schema": {
            "type": "object",
            "properties": {
