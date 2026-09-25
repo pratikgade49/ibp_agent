@@ -1098,11 +1098,12 @@ def analyze_capacity_bottlenecks(
             (group["missing_demand"], group["missing_usage"], group["missing_supply"])
         )
         utilization_from_ibp = group.get("utilization_pct")
-        utilization = (
-            utilization_from_ibp
-            if utilization_from_ibp is not None
-            else (usage / supply * 100 if required_values_present and supply and supply > 0 else None)
+        computed = (
+        usage / supply * 100
+        if required_values_present and supply and supply > 0
+        else None
         )
+        utilization = computed if computed is not None else utilization_from_ibp
         shortage = max(0.0, demand - supply) if required_values_present else None
         contributors = sorted(
             group["contributors"],
