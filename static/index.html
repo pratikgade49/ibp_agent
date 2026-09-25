@@ -98,11 +98,45 @@
     function renderCapacity(data) {
       $('chart-panel').classList.add('hidden');
       const statusTone=data.analysis_status === 'complete' ? 'teal' : 'coral';
-      $('metrics').innerHTML=metric('Rows evaluated',data.total_rows_evaluated)+metric('Bottlenecks',data.bottleneck_count,'coral')+metric('Activity rows',data.activity_row_count)+metric('Analysis status',data.analysis_status,statusTone);
+      const bottleneckTotal = data.tables ? Object.values(data.tables).reduce((total, table) => total + (table.summary?.bottleneck_count || 0), 0) : (data.bottleneck_count || 0);
+      $('metrics').innerHTML=metric('Rows evaluated',data.total_rows_evaluated)+metric('Bottlenecks',bottleneckTotal,'coral')+metric('Activity rows',data.activity_row_count)+metric('Analysis status',data.analysis_status,statusTone);
       $('alerts-panel').classList.remove('hidden');
       const warning=data.data_quality_warning ? `<div class="notice">${escapeHtml(data.data_quality_warning)}</div>` : '';
-      const rows=(data.results || []).slice(0,50);
-      $('alerts').innerHTML=warning+`<table><thead><tr><th>Resource</th><th>Location</th><th>Period</th><th>Capacity Supply</th><th>Capacity Usage of Production Resource</th><th>Capacity Utilization</th><th>Status</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${escapeHtml(row.resource || '-')}</td><td>${escapeHtml(row.location || '-')}</td><td>${escapeHtml(row.period || '-')}</td><td>${format(row.supply)}</td><td>${format(row.usage)}</td><td>${row.utilization_pct === null || row.utilization_pct === undefined ? 'N/A' : `${format(row.utilization_pct)}%`}</td><td>${escapeHtml(row.status || '-')}</td></tr>`).join('')}</tbody></table>`;
+      const tables = data.tables && Object.keys(data.tables).length ? data.tables : { [data.resource_type || 'capacity']: { title: 'Capacity results', rows: data.results || [], key_figures: data.key_figures || {} } };
+      const sections = Object.entries(tables).map(([resourceType, table]) => {
+        const rows = table.rows || [];
+        const d = rows.slice(0, 25);
+        const keyFigures = table.key_figures || {};
+        const activityLabel = keyFigures.usage || 'Capacity Usage';
+        const supplyLabel = keyFigures.supply || 'CAPASUPPLY';
+        const columns = resourceType === 'production'
+          ? ['Resource', 'Location', 'Source', 'Period', supplyLabel, activityLabel, 'Capacity Utilization', 'Status']
+          : resourceType === 'transportation'
+            ? ['Product', 'Location', 'Ship From', 'Mode', 'Period', supplyLabel, activityLabel, 'Capacity Utilization', 'Status']
+            : ['Resource', 'Location', 'Product', 'Period', supplyLabel, activityLabel, 'Capacity Utilization', 'Status'];
+        const rowsHtml = d.map(row => {
+          const resourceCell = resourceType === 'transportation' ? escapeHtml(row.product || '-') : escapeHtml(row.resource || '-');
+          const locationCell = resourceType === 'transportation' ? escapeHtml(row.location || '-') : escapeHtml(row.location || '-');
+          const sourceCell = resourceType === 'production' ? escapeHtml(row.source || '-') : '';
+          const shipCell = resourceType === 'transportation' ? escapeHtml(row.ship_from_location || '-') : '';
+          const modeCell = resourceType === 'transportation' ? escapeHtml(row.mode_of_transport || '-') : '';
+          const productCell = resourceType === 'production' || resourceType === 'handling' || resourceType === 'storage' ? escapeHtml(row.product || '-') : '';
+          const periodCell = escapeHtml(row.period || '-');
+          const supplyCell = format(row.supply);
+          const usageCell = format(row.usage);
+          const utilizationCell = row.utilization_pct === null || row.utilization_pct === undefined ? 'N/A' : `${format(row.utilization_pct)}%`;
+          const statusCell = escapeHtml(row.status || '-');
+          if (resourceType === 'transportation') {
+            return `<tr><td>${resourceCell}</td><td>${locationCell}</td><td>${shipCell}</td><td>${modeCell}</td><td>${periodCell}</td><td>${supplyCell}</td><td>${usageCell}</td><td>${utilizationCell}</td><td>${statusCell}</td></tr>`;
+          }
+          if (resourceType === 'production') {
+            return `<tr><td>${resourceCell}</td><td>${locationCell}</td><td>${sourceCell}</td><td>${periodCell}</td><td>${supplyCell}</td><td>${usageCell}</td><td>${utilizationCell}</td><td>${statusCell}</td></tr>`;
+          }
+          return `<tr><td>${resourceCell}</td><td>${locationCell}</td><td>${productCell}</td><td>${periodCell}</td><td>${supplyCell}</td><td>${usageCell}</td><td>${utilizationCell}</td><td>${statusCell}</td></tr>`;
+        }).join('');
+        return `<div class="wide" style="margin-top:12px;"><div class="eyebrow">${escapeHtml(table.title || resourceType)} details</div><table><thead><tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${rowsHtml || '<tr><td colspan="8">No rows for this resource type.</td></tr>'}</tbody></table></div>`;
+      }).join('');
+      $('alerts').innerHTML=warning+sections;
     }
     function render(result, question) {
       appendMessage('user', question); appendMessage('agent', result.reply);

@@ -35,9 +35,9 @@ order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
 For capacity questions, use analyze_capacity_bottlenecks. Match natural-language
 resource terms such as production, storage, handling, transport, or all to the
-resource_type argument. The tool uses IBP key figures DEPENDENTDEMAND for
-demand, PCAPAUSAGE for handling/storage, PCAPAUSAGE for production, and
-PCAPAUSAGE for transportation capacity usage, with CAPASUPPLY as the
+resource_type argument. The tool uses IBP key figures CAPADEMAND and CAPAUSAGE
+for handling/storage, PCAPADEMAND and PCAPAUSAGE for production,
+and TCAPADEMAND and TCAPAUSAGE for transportation, with CAPASUPPLY as the
 capacity-supply key figure.
 Use CAPACONSUMPTION for handling/storage, PCAPACONSUMPTION for production,
 and TCAPACONSUMPTION for transportation when explaining the capacity demand
@@ -56,7 +56,7 @@ Use period_start_rel=1 and period_end_rel=3 for the next three periods when the
 user says next three periods. Use utilization_threshold_pct when the user gives
 a percentage.
 Report utilization, period, resource, location, product, and production source
-when present. Use the IBP formula CAPASUPPLY / PCAPAUSAGE * 100 =
+when present. Use the IBP formula Capacity Usage / Capacity Supply * 100 =
 UTILIZATIONPCT, and set status to High_Utilization when UTILIZATIONPCT > 100,
 otherwise Within_Capacity. Do not invent resource IDs or capacity values. If
 analysis_status is no_activity_data, explain that all returned demand and usage
@@ -125,7 +125,7 @@ TOOL_REGISTRY = {
 TOOL_SCHEMAS = [
    {
        "name": "analyze_capacity_bottlenecks",
-    "description": "Analyze SAP IBP capacity bottlenecks. Use resource_type='production' for DEPENDENTDEMAND/PCAPAUSAGE, 'storage' or 'handling' for DEPENDENTDEMAND/PCAPAUSAGE, 'transportation' for TDEPENDENTDEMAND/PCAPAUSAGE, or 'all'. Match terms like production capacity, warehouse/storage capacity, goods-receipt/handling capacity, and transport capacity. Returns demand, usage, CAPASUPPLY, consumption rate, shortage, headroom, utilization, planning-level contributors, and affected dimensions. Transportation supply uses the IBP TransResLoc location.",
+    "description": "Analyze SAP IBP capacity bottlenecks. Use resource_type='production' for PCAPADEMAND/PCAPAUSAGE, 'storage' or 'handling' for CAPADEMAND/CAPAUSAGE, 'transportation' for TCAPADEMAND/TCAPAUSAGE, or 'all'. Match terms like production capacity, warehouse/storage capacity, goods-receipt/handling capacity, and transport capacity. Returns demand, usage, CAPASUPPLY, consumption rate, shortage, headroom, utilization, planning-level contributors, and affected dimensions. Transportation supply uses the IBP TransResLoc location.",
        "input_schema": {
            "type": "object",
            "properties": {
