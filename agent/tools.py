@@ -1098,12 +1098,10 @@ def analyze_capacity_bottlenecks(
             (group["missing_demand"], group["missing_usage"], group["missing_supply"])
         )
         utilization_from_ibp = group.get("utilization_pct")
-        computed = (
-        usage / supply * 100
-        if required_values_present and supply and supply > 0
-        else None
+        computed_utilization = (
+            usage / supply * 100 if required_values_present and supply and supply > 0 else None
         )
-        utilization = computed if computed is not None else utilization_from_ibp
+        utilization = computed_utilization if computed_utilization is not None else utilization_from_ibp
         shortage = max(0.0, demand - supply) if required_values_present else None
         contributors = sorted(
             group["contributors"],
@@ -1370,6 +1368,49 @@ def update_capacity_supply(
         "location": location,
         "period": period,
         "supply": supply,
+    })
+    return result
+
+def update_adjusted_production(
+    product: str,
+    location: str,
+    source_id: str,
+    period: str,
+    adjusted_production: float,
+    version: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Preview or import ADJUSTEDPRODUCTION at product-location-source-period level.
+
+    Setting a non-initial value here overrides PRODUCTION for that combination --
+    the planning algorithm uses this value instead of calculating a production
+    receipt, subject to component availability.
+    """
+    if not product or not location or not source_id:
+        raise ValueError("product, location, and source_id are required")
+    if adjusted_production < 0:
+        raise ValueError("adjusted_production cannot be negative")
+    period_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
+    fields = ["PRDID", "LOCID", CAPACITY_SOURCE_FIELD, "ADJUSTEDPRODUCTION", period_field]
+    values = {
+        "PRDID": _display_id(product),
+        "LOCID": _display_id(location),
+        CAPACITY_SOURCE_FIELD: _display_id(source_id),
+        "ADJUSTEDPRODUCTION": str(adjusted_production),
+        period_field: period,
+    }
+    result = update_planning_data(
+        aggregation_fields=fields,
+        aggregation_values=values,
+        version=version,
+        confirm=confirm,
+    )
+    result.update({
+        "product": product,
+        "location": location,
+        "source_id": source_id,
+        "period": period,
+        "adjusted_production": adjusted_production,
     })
     return result
 

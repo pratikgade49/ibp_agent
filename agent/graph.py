@@ -18,6 +18,7 @@ from agent.tools import (
     analyze_capacity_bottlenecks,
     recommend_capacity_action,
     update_capacity_supply,
+    update_adjusted_production,
    detect_forecast_anomalies,
    get_forecast_vs_consumption,
    get_sales_history_status,
@@ -67,7 +68,10 @@ recommend_capacity_action for a resolution proposal, and never write capacity
 changes without a separate explicit confirmation workflow. To change SUPPLY,
 call update_capacity_supply only after the user confirms the exact resource,
 location, period, resource type, and new supply value. For transportation, the
-location must be TransResLoc.
+location must be TransResLoc. To reschedule production out of a
+High_Utilization period, call update_adjusted_production only after the user
+confirms product, location, source ID, period, and quantity -- use it to move
+volume into a period with headroom instead of expanding supply.
 Use query_planning_data for generic questions involving totals, rankings, \
 maximums, minimums, averages, comparisons, or base planning-level results. \
 For base planning level, group by product, location, customer, and period \
@@ -113,6 +117,7 @@ TOOL_REGISTRY = {
     "analyze_capacity_bottlenecks": analyze_capacity_bottlenecks,
     "recommend_capacity_action": recommend_capacity_action,
     "update_capacity_supply": update_capacity_supply,
+    "update_adjusted_production": update_adjusted_production,
     "get_forecast_vs_consumption": get_forecast_vs_consumption,
     "detect_forecast_anomalies": detect_forecast_anomalies,
     "get_sales_history_status": get_sales_history_status,
@@ -172,6 +177,23 @@ TOOL_SCHEMAS = [
                "confirm": {"type": "boolean", "description": "Must be true only after explicit confirmation"},
            },
            "required": ["resource", "location", "period", "supply", "confirm"],
+       },
+   },
+   {
+       "name": "update_adjusted_production",
+       "description": "Preview or override SAP IBP Production Receipts by setting ADJUSTEDPRODUCTION at product-location-source-period level. Adjusted values take priority over calculated production and min/max/rounding lot sizes. Always call with confirm=false first and ask for explicit confirmation of product, location, source ID, period, and value. Use this to shift volume out of a High_Utilization period into a period with headroom.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "product": {"type": "string"},
+               "location": {"type": "string"},
+               "source_id": {"type": "string"},
+               "period": {"type": "string", "description": "Planning period in YYYY-MM format"},
+               "adjusted_production": {"type": "number", "description": "New production receipt quantity; must be non-negative"},
+               "version": {"type": "string", "description": "Optional IBP version ID"},
+               "confirm": {"type": "boolean", "description": "Must be true only after explicit confirmation"},
+           },
+           "required": ["product", "location", "source_id", "period", "adjusted_production", "confirm"],
        },
    },
    {
