@@ -5,6 +5,7 @@ independent of any other app already in this repo.
 """
 import os
 import uuid
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +13,11 @@ from pydantic import BaseModel
 from agent.graph import run_agent_with_data
 app = FastAPI(title="IBP Demand Planning Agent")
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+ROOT_DIR = Path(__file__).resolve().parent
+STATIC_DIR = ROOT_DIR / "static"
+FRONTEND_BUILD_DIR = STATIC_DIR / "build"
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 class AskRequest(BaseModel):
    message: str
@@ -29,7 +34,7 @@ CONVERSATIONS: dict[str, list[dict]] = {}
 
 @app.get("/", include_in_schema=False)
 def home():
-   return FileResponse("static/index.html")
+   return FileResponse(FRONTEND_BUILD_DIR / "index.html")
 
 @app.get("/health")
 def health():
