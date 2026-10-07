@@ -117,7 +117,8 @@ function formatValue(value: unknown): string {
 function isUsefulData(data: DataRecord | undefined): data is DataRecord {
   return Boolean(
     data &&
-      (Array.isArray(data.results) ||
+      (data.master_data_type && Array.isArray(data.results) ||
+        Array.isArray(data.results) ||
         Array.isArray(data.alert_results) ||
         Array.isArray(data.anomalies) ||
         typeof data.ready === 'boolean' ||
@@ -180,6 +181,36 @@ function MetricStrip({ items }: { items: Array<{ label: string; value: unknown; 
         </div>
       ))}
     </div>
+  );
+}
+
+function HealthCheckEvidence({ data }: { data: DataRecord }) {
+  const results = asRecords(data.results);
+  const errorCount = Number(data.error_count ?? 0);
+  const warningCount = Number(data.warning_count ?? 0);
+  const rows = results.map((result) => ({
+    Severity: String(result.severity || 'warning'),
+    Code: String(result.code || 'UNKNOWN'),
+    Message: String(result.message || ''),
+    Record: JSON.stringify(result.record || {}),
+  }));
+
+  return (
+    <>
+      <MetricStrip items={[
+        { label: 'Rows evaluated', value: data.total_rows_evaluated ?? results.length },
+        { label: 'Errors', value: errorCount, tone: errorCount ? 'alert' : '' },
+        { label: 'Warnings', value: warningCount, tone: warningCount ? 'warning' : '' },
+        { label: 'Source', value: data.source || 'unknown' },
+      ]} />
+      <section className="evidence-section">
+        <div className="section-heading">
+          <div><span className="section-kicker">Master data quality</span><h3>Health check findings</h3></div>
+          <span className="row-count">{results.length} findings</span>
+        </div>
+        <DataTable rows={rows} columns={['Severity', 'Code', 'Message', 'Record']} />
+      </section>
+    </>
   );
 }
 
@@ -251,6 +282,10 @@ function Evidence({ data }: { data: DataRecord }) {
   const results = asRecords(data.results);
   const alerts = asRecords(data.alert_results);
   const anomalies = asRecords(data.anomalies);
+
+  if (data.master_data_type && Array.isArray(data.results)) {
+    return <HealthCheckEvidence data={data} />;
+  }
 
   if (data.key_figures || data.resource_type && (data.total_rows_evaluated !== undefined || data.tables)) {
     return <CapacityEvidence data={data} />;

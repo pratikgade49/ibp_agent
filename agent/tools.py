@@ -6,13 +6,14 @@ data lifted directly from the original Joule Studio design doc's test
 prompts, so you can build and demo the full agent before wiring in a real
 SAP IBP system.
 Set USE_MOCK_DATA=false in the environment once you have a real IBP
-destination configured, and the same functions will call the live
-PLANNING_DATA_API_SRV OData service instead.
+destination configured. Master-data health checks call the live
+MASTER_DATA_API_SRV OData service; other tools call PLANNING_DATA_API_SRV.
 """
 import os
 import re
 import statistics
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Optional
 import requests
@@ -74,6 +75,7 @@ PLANNING_DATA_PATH = (
 )
 IBP_SERVICE_ROOT = "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV"
 MASTER_DATA_SERVICE_ROOT = "/sap/opu/odata/IBP/MASTER_DATA_API_SRV"
+MASTER_DATA_TYPE_PREFIX = os.environ.get("IBP_MASTER_DATA_TYPE_PREFIX", "")
 MASTER_DATA_TRANSACTION_NAME = os.environ.get(
     "MASTER_DATA_TRANSACTION_NAME", "IBP Demand Agent Master Data"
 )
@@ -341,6 +343,254 @@ def import_master_data(
     if delete_entries:
         payload["DeleteEntries"] = True
     return _master_data_write(master_data_type, payload)
+
+
+# ---------------------------------------------------------------------------
+# 5. Master Data Health Check
+# ---------------------------------------------------------------------------
+_MOCK_MASTER_DATA_HEALTH_CHECK_RECORDS = [
+    {"LOCID": "1010", "PRDID": "Product A", "PRODUCTGROUP": ""},
+    {"LOCID": "1010", "PRDID": "Product B", "PRODUCTGROUP": "FG"},
+    {"LOCID": "1010", "PRDID": "Product C", "PRODUCTGROUP": "FG"},
+]
+
+
+def _quality_check_records(
+    records: list[dict],
+    master_data_type: str,
+    required_attributes: list[str],
+) -> list[dict]:
+    """Run deterministic local checks for missing or blank attributes."""
+    findings = []
+    for record_index, record in enumerate(records):
+        for attribute in required_attributes:
+            value = record.get(attribute)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                findings.append(
+                    {
+                        "record": record,
+                        "record_index": record_index,
+                        "severity": "error",
+                        "code": "MISSING_REQUIRED_ATTRIBUTE",
+                        "message": f"Required attribute {attribute} is missing or blank.",
+                    }
+                )
+    return findings
+
+
+def run_master_data_health_check(
+    master_data_type: str,
+    planning_area: str | None = None,
+    version: str | None = None,
+    filters: list[str] | None = None,
+    attributes: list[str] | None = None,
+    required_attributes: list[str] | None = None,
+    max_results: int = 100,
+) -> dict:
+    """Extract master data from SAP IBP and run local quality checks.
+
+    The function uses the existing IBP_BASE_URL, IBP_USER, and IBP_PASSWORD
+    configuration. It does not require a separate health-check URL. Live
+    extraction uses the MASTER_DATA_API_SRV collection for the requested
+    master-data type. Local checks are intentionally conservative: required
+    attributes are checked for missing or blank values.
+    """
+    master_data_type = master_data_type.strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", master_data_type):
+        raise ValueError("master_data_type must be a valid SAP entity name")
+    if not 1 <= max_results <= 1000:
+        raise ValueError("max_results must be between 1 and 1000")
+    if filters is not None and not isinstance(filters, list):
+        raise ValueError("filters must be a list of SAP OData filter expressions")
+    if attributes is not None and not isinstance(attributes, list):
+        raise ValueError("attributes must be a list of master-data attributes")
+    if required_attributes is not None and not isinstance(required_attributes, list):
+        raise ValueError("required_attributes must be a list of master-data attributes")
+
+    selected_attributes = list(attributes or [])
+    required = list(required_attributes or [])
+    if not selected_attributes:
+        selected_attributes = ["*"]
+
+    filter_conditions = list(filters or [])
+    if planning_area:
+        filter_conditions.append(f"PlanningAreaID eq '{planning_area}'")
+    if version:
+        filter_conditions.append(f"VersionID eq '{version}'")
+
+    if USE_MOCK_DATA:
+        records = [
+            {key: value for key, value in record.items() if key in selected_attributes or "*" in selected_attributes}
+            for record in _MOCK_MASTER_DATA_HEALTH_CHECK_RECORDS
+        ]
+    else:
+        if not IBP_BASE_URL:
+            raise RuntimeError("IBP_BASE_URL is required when USE_MOCK_DATA=false")
+        endpoint = f"{IBP_BASE_URL}{MASTER_DATA_SERVICE_ROOT}/{master_data_type}"
+        params = {
+            "$select": ",".join(selected_attributes),
+            "$top": max_results,
+            "$format": "json",
+        }
+        if filter_conditions:
+            params["$filter"] = " and ".join(filter_conditions)
+        response = requests.get(
+            endpoint,
+            params=params,
+            auth=(IBP_USER, IBP_PASSWORD),
+            timeout=60,
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"SAP IBP master-data extraction failed with HTTP "
+                f"{response.status_code}: {response.text}"
+            )
+        records = response.json().get("d", {}).get("results", [])
+
+    findings = _quality_check_records(records, master_data_type, required)
+    normalized_results = [
+        {
+            "record": finding["record"],
+            "record_index": finding["record_index"],
+            "severity": finding["severity"],
+            "code": finding["code"],
+            "message": finding["message"],
+            "master_data_type": master_data_type,
+        }
+        for finding in findings[:max_results]
+    ]
+    return {
+        "status": "completed",
+        "master_data_type": master_data_type,
+        "planning_area": planning_area,
+        "version": version,
+        "result_scope": "filtered" if filter_conditions else "all",
+        "filters": filter_conditions,
+        "attributes": selected_attributes,
+        "required_attributes": required,
+        "total_rows_evaluated": len(records),
+        "error_count": sum(item["severity"] == "error" for item in normalized_results),
+        "warning_count": sum(item["severity"] == "warning" for item in normalized_results),
+        "results": normalized_results,
+        "source": "mock" if USE_MOCK_DATA else "live",
+    }
+
+
+def _discover_product_master_data_types(planning_area: str) -> list[str]:
+    """Discover planning-area-prefixed entities that expose PRDID.
+
+    SAP Gateway metadata uses app:collection entries and does not publish
+    entity property schemas. Those collection names are therefore candidates
+    that are validated by the product-specific OData query in the health-check
+    workflow. EDM metadata remains supported for environments that provide it.
+    """
+    if not IBP_BASE_URL:
+        raise RuntimeError("IBP_BASE_URL is required to discover master-data types")
+    metadata_url = f"{IBP_BASE_URL}{MASTER_DATA_SERVICE_ROOT}/$metadata"
+    response = requests.get(metadata_url, auth=(IBP_USER, IBP_PASSWORD), timeout=60)
+    if not response.ok:
+        raise RuntimeError(
+            f"SAP IBP master-data metadata request failed with HTTP "
+            f"{response.status_code}: {response.text}"
+        )
+
+    prefix = MASTER_DATA_TYPE_PREFIX or planning_area[:3].upper()
+    if not prefix:
+        raise RuntimeError("A master-data type prefix is required for discovery")
+
+    root = ET.fromstring(response.text)
+    namespace = {"edm": "http://docs.oasis-open.org/odata/ns/edm"}
+    entity_types = {
+        entity_type.attrib["Name"]: {
+            property.attrib["Name"]
+            for property in entity_type.findall("edm:Property", namespace)
+        }
+        for entity_type in root.findall(".//edm:EntityType", namespace)
+    }
+    entity_sets = {
+        entity_set.attrib["Name"]: entity_set.attrib["EntityType"]
+        for entity_set in root.findall(".//edm:EntitySet", namespace)
+    }
+    discovered = {
+        entity_set_name
+        for entity_set_name, entity_type_name in entity_sets.items()
+        if entity_set_name.upper().startswith(prefix)
+        and "PRDID" in entity_types.get(entity_type_name, set())
+    }
+
+    gateway_collections = {
+        collection.attrib["href"].strip().upper()
+        for collection in root.iter()
+        if collection.attrib.get("href", "").strip().upper().startswith(prefix)
+    }
+    operational_suffixes = ("_VI", "MESSAGE", "TRANS")
+    product_collections = {
+        collection
+        for collection in gateway_collections
+        if "PRODUCT" in collection
+        and not collection.endswith(operational_suffixes)
+    }
+    discovered.update(product_collections)
+    return sorted(discovered)
+
+
+def run_product_master_data_health_check(
+    product: str,
+    planning_area: str | None = None,
+    version: str | None = None,
+    attributes: list[str] | None = None,
+    required_attributes: list[str] | None = None,
+    max_results: int = 100,
+) -> dict:
+    """Discover and check all product-related master-data types in one call."""
+    product = product.strip()
+    if not product:
+        raise ValueError("product must not be empty")
+    if not 1 <= max_results <= 1000:
+        raise ValueError("max_results must be between 1 and 1000")
+    if attributes is not None and not isinstance(attributes, list):
+        raise ValueError("attributes must be a list of master-data attributes")
+    if required_attributes is not None and not isinstance(required_attributes, list):
+        raise ValueError("required_attributes must be a list of master-data attributes")
+
+    planning_area_value = planning_area or IBP_PLANNING_AREA
+    prefix = MASTER_DATA_TYPE_PREFIX or planning_area_value[:3].upper()
+    if USE_MOCK_DATA:
+        master_data_types = [f"{prefix}PRODUCT", f"{prefix}LOCATION"]
+    else:
+        master_data_types = _discover_product_master_data_types(planning_area_value)
+        if not master_data_types:
+            raise RuntimeError(
+                "No planning-area-prefixed product-related master-data types were found"
+            )
+
+    master_data_results = []
+    total_rows = 0
+    for master_data_type in master_data_types:
+        result = run_master_data_health_check(
+            master_data_type=master_data_type,
+            planning_area=planning_area,
+            version=version,
+            filters=[f"PRDID eq '{product}'"],
+            attributes=attributes,
+            required_attributes=required_attributes,
+            max_results=max_results,
+        )
+        master_data_results.append(result)
+        total_rows += result["total_rows_evaluated"]
+
+    return {
+        "status": "completed",
+        "product": product,
+        "planning_area": planning_area,
+        "version": version,
+        "total_master_data_types": len(master_data_results),
+        "total_rows_evaluated": total_rows,
+        "error_count": sum(result["error_count"] for result in master_data_results),
+        "warning_count": sum(result["warning_count"] for result in master_data_results),
+        "master_data_results": master_data_results,
+        "source": "mock" if USE_MOCK_DATA else "live",
+    }
 
 
 def recommend_planning_action(

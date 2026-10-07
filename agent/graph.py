@@ -27,13 +27,23 @@ from agent.tools import (
     update_planning_data,
     recommend_planning_action,
     import_master_data,
+    run_master_data_health_check,
+    run_product_master_data_health_check,
 )
 SYSTEM_PROMPT = """You are the IBP Demand Planning Agent. You help demand \
-planners validate data, monitor consumption variance, and detect forecast \
-anomalies in SAP Integrated Business Planning.
-You have ten tools available. Decide which tool(s) to call and in what \
+planners validate data, monitor consumption variance, detect forecast \
+anomalies, and run master-data health checks in SAP Integrated Business Planning.
+You have thirteen tools available. Decide which tool(s) to call and in what \
 order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
+For master-data health checks, use run_product_master_data_health_check when \
+the user gives a product and asks to check all related master data. The tool \
+discovers product-related entity sets from MASTER_DATA_API_SRV metadata, \
+extracts each entity for the requested product, and runs local quality checks. \
+Use run_master_data_health_check only when the user explicitly supplies a \
+master-data type. Both tools are read-only and return normalized errors and \
+warnings. Do not claim that a health check passed unless the returned status is \
+completed and the error_count is zero.
 For capacity questions, use analyze_capacity_bottlenecks. Match natural-language
 resource terms such as production, storage, handling, transport, or all to the
 resource_type argument. The tool uses IBP key figures CAPADEMAND and CAPAUSAGE
@@ -126,8 +136,43 @@ TOOL_REGISTRY = {
     "update_planning_data": update_planning_data,
     "recommend_planning_action": recommend_planning_action,
     "import_master_data": import_master_data,
+    "run_master_data_health_check": run_master_data_health_check,
+    "run_product_master_data_health_check": run_product_master_data_health_check,
     }
 TOOL_SCHEMAS = [
+   {
+       "name": "run_product_master_data_health_check",
+       "description": "Discover all SAP IBP master-data entity sets that contain PRDID, extract each entity for the requested product, and run local read-only quality checks. Use when the user supplies only a product ID and wants all related master data checked. Uses MASTER_DATA_API_SRV metadata and records through the existing Destination credentials; no separate health-check URL is required.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "product": {"type": "string", "description": "Product ID to locate in all related master-data entities"},
+               "planning_area": {"type": "string", "description": "Optional planning area ID"},
+               "version": {"type": "string", "description": "Optional planning-area version ID"},
+               "attributes": {"type": "array", "items": {"type": "string"}, "description": "Attributes to retrieve from each discovered entity"},
+               "required_attributes": {"type": "array", "items": {"type": "string"}, "description": "Attributes that must be present and non-blank in each entity"},
+               "max_results": {"type": "integer", "description": "Maximum extracted records per entity, from 1 to 1000", "minimum": 1, "maximum": 1000},
+           },
+           "required": ["product", "max_results"],
+       },
+   },
+   {
+       "name": "run_master_data_health_check",
+       "description": "Extract a SAP IBP master-data type through MASTER_DATA_API_SRV and run local read-only quality checks. Use for model-change validation, dependency checks, attribute checks, and application-specific validation. Returns normalized errors and warnings, counts, evaluated scope, filters, and raw result records. Uses IBP_BASE_URL and the bound Destination credentials; no separate health-check URL is required.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "master_data_type": {"type": "string", "description": "SAP master data type, for example LOCATIONPRODUCT"},
+               "planning_area": {"type": "string", "description": "Optional planning area ID"},
+               "version": {"type": "string", "description": "Optional planning-area version ID"},
+               "filters": {"type": "array", "items": {"type": "string"}, "description": "Optional SAP OData filter expressions"},
+               "attributes": {"type": "array", "items": {"type": "string"}, "description": "Attributes to retrieve; use '*' for all attributes"},
+               "required_attributes": {"type": "array", "items": {"type": "string"}, "description": "Attributes that must be present and non-blank"},
+               "max_results": {"type": "integer", "description": "Maximum extracted records and findings, from 1 to 1000", "minimum": 1, "maximum": 1000},
+           },
+           "required": ["master_data_type", "max_results"],
+       },
+   },
    {
        "name": "analyze_capacity_bottlenecks",
     "description": "Analyze SAP IBP capacity bottlenecks. Use resource_type='production' for PCAPADEMAND/PCAPAUSAGE, 'storage' or 'handling' for CAPADEMAND/CAPAUSAGE, 'transportation' for TCAPADEMAND/TCAPAUSAGE, or 'all'. Match terms like production capacity, warehouse/storage capacity, goods-receipt/handling capacity, and transport capacity. Returns demand, usage, CAPASUPPLY, consumption rate, shortage, headroom, utilization, planning-level contributors, and affected dimensions. Transportation supply uses the IBP TransResLoc location.",
