@@ -142,7 +142,7 @@ TOOL_REGISTRY = {
 TOOL_SCHEMAS = [
    {
        "name": "run_product_master_data_health_check",
-       "description": "Discover all SAP IBP master-data entity sets that contain PRDID, extract each entity for the requested product, and run local read-only quality checks. Use when the user supplies only a product ID and wants all related master data checked. Uses MASTER_DATA_API_SRV metadata and records through the existing Destination credentials; no separate health-check URL is required.",
+       "description": "Discover all SAP IBP master-data entity sets that contain PRDID, extract each entity for the requested product, and run local read-only checks: completeness (mandatory fields from service metadata plus any required_attributes), coverage (product exists in product master and location-product, has a source of supply), referential integrity (locations, customers, resources, currencies, etc. exist in their masters), and consistency (negative values, invalid ranges, valid-from after valid-to). The result lists checks_performed and checks_skipped; report both, and do not call data healthy if checks were skipped. Use when the user supplies only a product ID and wants all related master data checked. Uses MASTER_DATA_API_SRV metadata and records through the existing Destination credentials; no separate health-check URL is required.",
        "input_schema": {
            "type": "object",
            "properties": {

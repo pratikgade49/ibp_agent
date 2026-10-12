@@ -14,7 +14,7 @@ import re
 import statistics
 import uuid
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import requests
 USE_MOCK_DATA = os.environ.get("USE_MOCK_DATA", "true").lower() == "true"
@@ -378,7 +378,7 @@ def _quality_check_records(
     return findings
 
 
-def run_master_data_health_check(
+def _master_data_health_check_core(
     master_data_type: str,
     planning_area: str | None = None,
     version: str | None = None,
@@ -386,7 +386,7 @@ def run_master_data_health_check(
     attributes: list[str] | None = None,
     required_attributes: list[str] | None = None,
     max_results: int = 100,
-) -> dict:
+) -> tuple[dict, list]:
     """Extract master data from SAP IBP and run local quality checks.
 
     The function uses the existing IBP_BASE_URL, IBP_USER, and IBP_PASSWORD
@@ -459,7 +459,7 @@ def run_master_data_health_check(
         }
         for finding in findings[:max_results]
     ]
-    return {
+    result = {
         "status": "completed",
         "master_data_type": master_data_type,
         "planning_area": planning_area,
@@ -474,15 +474,53 @@ def run_master_data_health_check(
         "results": normalized_results,
         "source": "mock" if USE_MOCK_DATA else "live",
     }
+    return result, records
 
 
-def _discover_product_master_data_types(planning_area: str) -> list[str]:
-    """Discover planning-area-prefixed entities that expose PRDID.
+def run_master_data_health_check(
+    master_data_type: str,
+    planning_area: str | None = None,
+    version: str | None = None,
+    filters: list[str] | None = None,
+    attributes: list[str] | None = None,
+    required_attributes: list[str] | None = None,
+    max_results: int = 100,
+) -> dict:
+    """Extract one master-data type from SAP IBP and run local quality checks."""
+    result, _records = _master_data_health_check_core(
+        master_data_type=master_data_type,
+        planning_area=planning_area,
+        version=version,
+        filters=filters,
+        attributes=attributes,
+        required_attributes=required_attributes,
+        max_results=max_results,
+    )
+    return result
 
-    SAP Gateway metadata uses app:collection entries and does not publish
-    entity property schemas. Those collection names are therefore candidates
-    that are validated by the product-specific OData query in the health-check
-    workflow. EDM metadata remains supported for environments that provide it.
+
+_OPERATIONAL_SUFFIXES = ("_VI", "MESSAGE", "TRANS")
+
+
+def _xml_local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _load_master_data_catalog(planning_area: str) -> dict:
+    """Fetch MASTER_DATA_API_SRV metadata once and build a reusable catalog.
+
+    MASTER_DATA_API_SRV is OData V2 (schemas.microsoft.com/ado/2008/09/edm);
+    other gateways and older tests use the V4 namespace, so elements are matched
+    on local names. SAP Gateway service documents (app:collection) are also
+    supported as a fallback for discovery.
+
+    The catalog contains:
+      prefix            master-data type prefix in use
+      entity_types      {type name: {property name: {"nullable": bool}}}
+      entity_sets       {entity set name: type name}
+      mandatory         {type name: {property names marked Mandatory/non-nullable}}
+      all_sets          every entity set / collection name (upper-case)
+      discovered        sorted product-related entity sets (contain PRDID)
     """
     if not IBP_BASE_URL:
         raise RuntimeError("IBP_BASE_URL is required to discover master-data types")
@@ -494,44 +532,326 @@ def _discover_product_master_data_types(planning_area: str) -> list[str]:
             f"{response.status_code}: {response.text}"
         )
 
-    prefix = MASTER_DATA_TYPE_PREFIX or planning_area[:3].upper()
+    prefix = (MASTER_DATA_TYPE_PREFIX or planning_area[:3]).upper()
     if not prefix:
         raise RuntimeError("A master-data type prefix is required for discovery")
 
     root = ET.fromstring(response.text)
-    namespace = {"edm": "http://docs.oasis-open.org/odata/ns/edm"}
-    entity_types = {
-        entity_type.attrib["Name"]: {
-            property.attrib["Name"]
-            for property in entity_type.findall("edm:Property", namespace)
-        }
-        for entity_type in root.findall(".//edm:EntityType", namespace)
-    }
-    entity_sets = {
-        entity_set.attrib["Name"]: entity_set.attrib["EntityType"]
-        for entity_set in root.findall(".//edm:EntitySet", namespace)
-    }
+
+    entity_types: dict[str, dict] = {}
+    entity_sets: dict[str, str] = {}
+    mandatory: dict[str, set] = {}
+    for element in root.iter():
+        local = _xml_local(element.tag)
+        if local == "EntityType" and "Name" in element.attrib:
+            props = {}
+            for child in element:
+                if _xml_local(child.tag) == "Property" and "Name" in child.attrib:
+                    props[child.attrib["Name"]] = {
+                        "nullable": child.attrib.get("Nullable", "true").lower() != "false"
+                    }
+            entity_types[element.attrib["Name"]] = props
+        elif local == "EntitySet" and "Name" in element.attrib and "EntityType" in element.attrib:
+            entity_sets[element.attrib["Name"]] = element.attrib["EntityType"].rsplit(".", 1)[-1]
+        elif local == "Annotations" and "Target" in element.attrib:
+            for annotation in element:
+                if (
+                    _xml_local(annotation.tag) == "Annotation"
+                    and annotation.attrib.get("Term", "").endswith("FieldControl")
+                    and annotation.attrib.get("EnumMember", "").endswith("/Mandatory")
+                ):
+                    type_name, _, prop = element.attrib["Target"].partition("/")
+                    if prop:
+                        mandatory.setdefault(type_name.rsplit(".", 1)[-1], set()).add(prop)
+    for type_name, props in entity_types.items():
+        for prop, info in props.items():
+            if not info["nullable"]:
+                mandatory.setdefault(type_name, set()).add(prop)
+
     discovered = {
-        entity_set_name
-        for entity_set_name, entity_type_name in entity_sets.items()
-        if entity_set_name.upper().startswith(prefix)
-        and "PRDID" in entity_types.get(entity_type_name, set())
+        set_name
+        for set_name, type_name in entity_sets.items()
+        if set_name.upper().startswith(prefix)
+        and not set_name.upper().endswith(_OPERATIONAL_SUFFIXES)
+        and "PRDID" in entity_types.get(type_name, {})
     }
 
     gateway_collections = {
-        collection.attrib["href"].strip().upper()
-        for collection in root.iter()
-        if collection.attrib.get("href", "").strip().upper().startswith(prefix)
+        element.attrib["href"].strip().upper()
+        for element in root.iter()
+        if element.attrib.get("href", "").strip().upper().startswith(prefix)
     }
-    operational_suffixes = ("_VI", "MESSAGE", "TRANS")
-    product_collections = {
+    discovered.update(
         collection
         for collection in gateway_collections
-        if "PRODUCT" in collection
-        and not collection.endswith(operational_suffixes)
+        if "PRODUCT" in collection and not collection.endswith(_OPERATIONAL_SUFFIXES)
+    )
+
+    return {
+        "prefix": prefix,
+        "entity_types": entity_types,
+        "entity_sets": entity_sets,
+        "mandatory": mandatory,
+        "all_sets": {name.upper() for name in entity_sets} | gateway_collections,
+        "discovered": sorted(discovered),
     }
-    discovered.update(product_collections)
-    return sorted(discovered)
+
+
+def _discover_product_master_data_types(planning_area: str) -> list[str]:
+    """Discover prefix-matched entity sets that expose PRDID."""
+    return _load_master_data_catalog(planning_area)["discovered"]
+
+
+# ---------------------------------------------------------------------------
+# Business rules for the product health check.
+#
+# Rules are keyed by the entity-set name WITHOUT the master-data prefix, so they
+# apply to ZJPPRODUCT, ABCPRODUCT, ... alike. The defaults below are a starting
+# point and should be reviewed by the planning team. To change them without a
+# code change, set IBP_MASTER_DATA_RULES_FILE to a JSON file with the same shape
+# ({"types": {...}, "coverage_groups": [...]}); entries replace the defaults
+# per type / per group name.
+#
+# Per-type keys:
+#   coverage            "error" | "warning"  -> the product must have >= 1 row
+#   required            {attr: severity}     -> must be non-blank when present
+#   non_negative        [attr, ...]          -> numeric values must be >= 0
+#   ordered             [{"low", "high", "zero_high_means_unset"?}]
+#                                            -> low <= high (numbers or dates)
+#   warn_zero           [attr, ...]          -> a value of exactly 0 is suspicious
+#   location_must_exist_in_locationproduct   -> LOCID must also have a
+#                                               LOCATIONPRODUCT row (warning)
+# ---------------------------------------------------------------------------
+_DEFAULT_MASTER_DATA_RULES: dict = {
+    "types": {
+        "PRODUCT": {
+            "coverage": "error",
+            "required": {"UOMID": "error", "PRDDESCR": "warning"},
+        },
+        "LOCATIONPRODUCT": {
+            "coverage": "error",
+            "non_negative": [
+                "SAFETYSTOCK", "MOQ", "IOMINSAFETYDAYS", "IOMAXSAFETYDAYS",
+                "FROZENHORIZON",
+            ],
+            "ordered": [
+                {"low": "IOMINSAFETYDAYS", "high": "IOMAXSAFETYDAYS"},
+                {"low": "MININTERNALSERVICELEVEL", "high": "MAXINTERNALSERVICELEVEL"},
+            ],
+        },
+        "SOURCEPRODUCTION": {
+            "non_negative": ["PLEADTIME", "PMINLOTSIZE", "PMAXLOTSIZE", "PROUNDING", "PRATIO"],
+            "ordered": [
+                {"low": "PMINLOTSIZE", "high": "PMAXLOTSIZE", "zero_high_means_unset": True}
+            ],
+            "warn_zero": ["PLEADTIME"],
+            "location_must_exist_in_locationproduct": True,
+        },
+        "SOURCELOCATION": {
+            "non_negative": ["TLEADTIME", "TMINLOTSIZE", "TMAXLOTSIZE", "TROUNDING", "TRATIO"],
+            "ordered": [
+                {"low": "TMINLOTSIZE", "high": "TMAXLOTSIZE", "zero_high_means_unset": True}
+            ],
+            "warn_zero": ["TLEADTIME"],
+            "location_must_exist_in_locationproduct": True,
+        },
+        "SOURCECUSTOMER": {
+            "non_negative": ["CLEADTIME", "CRATIO"],
+            "location_must_exist_in_locationproduct": True,
+        },
+        "LOCATIONPRODUCTCURRENCY": {
+            "non_negative": ["COSTPERUNIT"],
+            "location_must_exist_in_locationproduct": True,
+        },
+        "RESOURCELOCATIONPRODUCT": {
+            "non_negative": ["CAPACONSUMPTION"],
+            "location_must_exist_in_locationproduct": True,
+        },
+        "SOURCEPRODUCTIONVALIDITY": {"ordered": [{"low": "PVALIDFR", "high": "PVALIDTO"}]},
+        "SOURCELOCATIONVALIDITY": {"ordered": [{"low": "TVALIDFR", "high": "TVALIDTO"}]},
+        "SOURCECUSTOMERVALIDITY": {"ordered": [{"low": "CVALIDFR", "high": "CVALIDTO"}]},
+        "PRODUCTIONSOURCEITMVALIDITY": {"ordered": [{"low": "COMPVALIDFR", "high": "COMPVALIDTO"}]},
+        "LOCATIONPRODUCTSUB": {"ordered": [{"low": "LPSVALIDFR", "high": "LPSVALIDTO"}]},
+        "UOMCONVERSIONFACTOR": {"non_negative": ["UOMCONVERSIONFACTOR"]},
+    },
+    # "at least one of these types must have rows for the product"
+    "coverage_groups": [
+        {
+            "name": "supply source",
+            "types": ["SOURCEPRODUCTION", "SOURCELOCATION"],
+            "severity": "warning",
+            "message": (
+                "Product has no source of supply (no production source and no "
+                "transportation/location source), so supply planning cannot "
+                "create receipts for it."
+            ),
+        }
+    ],
+}
+
+# attribute found in product rows -> (master-data type suffix, key in that master)
+_REFERENCE_FIELDS = {
+    "LOCID": ("LOCATION", "LOCID"),
+    "LOCFR": ("LOCATION", "LOCID"),
+    "CUSTID": ("CUSTOMER", "CUSTID"),
+    "RESID": ("RESOURCE", "RESID"),
+    "SPRDID": ("PRODUCT", "PRDID"),
+    "PRDFR": ("PRODUCT", "PRDID"),
+    "CURRID": ("CURRENCY", "CURRID"),
+    "UOMTOID": ("UOMTO", "UOMTOID"),
+    "PLUNITID": ("PLANNINGUNIT", "PLUNITID"),
+}
+_REFERENCE_CHUNK = 20
+
+
+def _load_master_data_rules() -> dict:
+    import copy
+    import json
+
+    rules = copy.deepcopy(_DEFAULT_MASTER_DATA_RULES)
+    path = os.environ.get("IBP_MASTER_DATA_RULES_FILE", "").strip()
+    if path:
+        with open(path, encoding="utf-8") as handle:
+            override = json.load(handle)
+        rules["types"].update(override.get("types", {}))
+        if "coverage_groups" in override:
+            by_name = {group["name"]: group for group in rules["coverage_groups"]}
+            by_name.update({group["name"]: group for group in override["coverage_groups"]})
+            rules["coverage_groups"] = list(by_name.values())
+    return rules
+
+
+def _as_number(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_date(value):
+    """Parse OData V2 '/Date(ms)/' values and ISO-8601 strings."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        match = re.fullmatch(r"/Date\((-?\d+)(?:[+-]\d+)?\)/", value.strip())
+        if match:
+            return datetime.fromtimestamp(int(match.group(1)) / 1000, tz=timezone.utc).replace(tzinfo=None)
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def _is_blank(value) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _make_finding(severity, code, message, master_data_type, record=None, index=None):
+    return {
+        "record": record if record is not None else {},
+        "record_index": index,
+        "severity": severity,
+        "code": code,
+        "message": message,
+        "master_data_type": master_data_type,
+    }
+
+
+def _suffix_of(master_data_type: str, prefix: str) -> str:
+    name = master_data_type.upper()
+    return name[len(prefix):] if name.startswith(prefix) else name
+
+
+def _row_checks(rows, master_data_type, type_rules, mandatory_attrs) -> list[dict]:
+    """Completeness (metadata + rules) and consistency checks on fetched rows."""
+    findings = []
+    ordered_rules = type_rules.get("ordered", [])
+    for index, row in enumerate(rows):
+        # Completeness from metadata: mandatory fields must not be blank when returned.
+        for attribute in sorted(mandatory_attrs):
+            if attribute in row and _is_blank(row[attribute]):
+                findings.append(_make_finding(
+                    "error", "MISSING_MANDATORY_ATTRIBUTE",
+                    f"Mandatory attribute {attribute} (per service metadata) is blank.",
+                    master_data_type, row, index,
+                ))
+        for attribute, severity in type_rules.get("required", {}).items():
+            if attribute in row and _is_blank(row[attribute]):
+                findings.append(_make_finding(
+                    severity, "MISSING_REQUIRED_ATTRIBUTE",
+                    f"Required attribute {attribute} is missing or blank.",
+                    master_data_type, row, index,
+                ))
+        for attribute in type_rules.get("non_negative", []):
+            number = _as_number(row.get(attribute))
+            if number is not None and number < 0:
+                findings.append(_make_finding(
+                    "error", "NEGATIVE_VALUE",
+                    f"{attribute} is negative ({row.get(attribute)}).",
+                    master_data_type, row, index,
+                ))
+        for attribute in type_rules.get("warn_zero", []):
+            number = _as_number(row.get(attribute))
+            if number is not None and number == 0:
+                findings.append(_make_finding(
+                    "warning", "ZERO_VALUE",
+                    f"{attribute} is 0; confirm this is intended.",
+                    master_data_type, row, index,
+                ))
+        for rule in ordered_rules:
+            low_raw, high_raw = row.get(rule["low"]), row.get(rule["high"])
+            low, high = _as_number(low_raw), _as_number(high_raw)
+            if low is None or high is None:
+                low, high = _as_date(low_raw), _as_date(high_raw)
+            if low is None or high is None:
+                continue
+            if rule.get("zero_high_means_unset") and high == 0:
+                continue
+            if low > high:
+                findings.append(_make_finding(
+                    "error", "INVALID_RANGE",
+                    f"{rule['low']} ({low_raw}) is greater than {rule['high']} ({high_raw}).",
+                    master_data_type, row, index,
+                ))
+    return findings
+
+
+def _lookup_existing_values(master_set, key, values, planning_area, version, notes):
+    """Return the subset of `values` that exist in `master_set.key` (live lookups)."""
+    found: set = set()
+    for start in range(0, len(values), _REFERENCE_CHUNK):
+        chunk = values[start:start + _REFERENCE_CHUNK]
+        condition = " or ".join(
+            "{} eq '{}'".format(key, value.replace("'", "''")) for value in chunk
+        )
+        conditions = [f"({condition})"]
+        if planning_area:
+            conditions.append(f"PlanningAreaID eq '{planning_area}'")
+        if version:
+            conditions.append(f"VersionID eq '{version}'")
+        response = requests.get(
+            f"{IBP_BASE_URL}{MASTER_DATA_SERVICE_ROOT}/{master_set}",
+            params={
+                "$select": key,
+                "$top": 1000,
+                "$format": "json",
+                "$filter": " and ".join(conditions),
+            },
+            auth=(IBP_USER, IBP_PASSWORD),
+            timeout=60,
+        )
+        if not response.ok:
+            notes.append(
+                f"Reference lookup in {master_set} failed with HTTP {response.status_code}."
+            )
+            return None
+        for row in response.json().get("d", {}).get("results", []):
+            if row.get(key) is not None:
+                found.add(str(row[key]))
+    return found
 
 
 def run_product_master_data_health_check(
@@ -542,7 +862,20 @@ def run_product_master_data_health_check(
     required_attributes: list[str] | None = None,
     max_results: int = 100,
 ) -> dict:
-    """Discover and check all product-related master-data types in one call."""
+    """Discover and check all product-related master-data types in one call.
+
+    Checks performed (live mode):
+      completeness  mandatory fields from service metadata, caller-supplied
+                    required_attributes (only on types that have the attribute),
+                    and per-type required attributes from the rules.
+      coverage      the product must exist in the product master and in
+                    location-product; at least one supply source must exist.
+      referential   LOCID/LOCFR/CUSTID/RESID/SPRDID/PRDFR/CURRID/UOMTOID/PLUNITID
+                    values found must exist in their master-data type; sources
+                    must point to a location that has a location-product row.
+      consistency   non-negative values, low <= high ranges, valid-from <= valid-to.
+      plausibility  suspicious zero values (warnings).
+    """
     product = product.strip()
     if not product:
         raise ValueError("product must not be empty")
@@ -554,40 +887,204 @@ def run_product_master_data_health_check(
         raise ValueError("required_attributes must be a list of master-data attributes")
 
     planning_area_value = planning_area or IBP_PLANNING_AREA
-    prefix = MASTER_DATA_TYPE_PREFIX or planning_area_value[:3].upper()
+    catalog = None
     if USE_MOCK_DATA:
+        prefix = (MASTER_DATA_TYPE_PREFIX or planning_area_value[:3]).upper()
         master_data_types = [f"{prefix}PRODUCT", f"{prefix}LOCATION"]
     else:
-        master_data_types = _discover_product_master_data_types(planning_area_value)
+        catalog = _load_master_data_catalog(planning_area_value)
+        prefix = catalog["prefix"]
+        master_data_types = catalog["discovered"]
         if not master_data_types:
             raise RuntimeError(
                 "No planning-area-prefixed product-related master-data types were found"
             )
 
+    rules = _load_master_data_rules() if catalog else {"types": {}, "coverage_groups": []}
+    checks_skipped: list[str] = []
+    if catalog is None:
+        checks_skipped.append(
+            "metadata, coverage, referential and consistency checks (mock mode)"
+        )
+
     master_data_results = []
+    rows_by_suffix: dict[str, list] = {}
+    truncated_suffixes: set[str] = set()
     total_rows = 0
+    user_required = list(required_attributes or [])
+
     for master_data_type in master_data_types:
-        result = run_master_data_health_check(
+        suffix = _suffix_of(master_data_type, prefix)
+        required_for_type = user_required
+        props = None
+        if catalog:
+            type_name = catalog["entity_sets"].get(master_data_type)
+            props = catalog["entity_types"].get(type_name) if type_name else None
+            if props:
+                required_for_type = [a for a in user_required if a in props]
+                for attribute in user_required:
+                    if attribute not in props:
+                        checks_skipped.append(
+                            f"{master_data_type}: required attribute {attribute} "
+                            "does not exist on this type"
+                        )
+
+        result, rows = _master_data_health_check_core(
             master_data_type=master_data_type,
             planning_area=planning_area,
             version=version,
             filters=[f"PRDID eq '{product}'"],
             attributes=attributes,
-            required_attributes=required_attributes,
+            required_attributes=required_for_type,
             max_results=max_results,
         )
+
+        if catalog:
+            type_rules = rules["types"].get(suffix, {})
+            mandatory_attrs = set()
+            if props:
+                mandatory_attrs = {
+                    a for a in catalog["mandatory"].get(type_name, set())
+                    if a not in ("PlanningAreaID", "VersionID")
+                }
+            extra = _row_checks(rows, master_data_type, type_rules, mandatory_attrs)
+            room = max(0, max_results - len(result["results"]))
+            result["results"].extend(extra[:room])
+            result["error_count"] += sum(f["severity"] == "error" for f in extra[:room])
+            result["warning_count"] += sum(f["severity"] == "warning" for f in extra[:room])
+            result["additional_findings_truncated"] = len(extra) > room
+            rows_by_suffix[suffix] = rows
+            if len(rows) >= max_results:
+                truncated_suffixes.add(suffix)
+        result["row_count"] = len(rows)
         master_data_results.append(result)
         total_rows += result["total_rows_evaluated"]
 
+    product_findings: list[dict] = []
+    reference_summary: dict[str, int] = {}
+    coverage_summary = {"types_without_rows": [], "rules_evaluated": 0}
+    consistency_rules = 0
+
+    if catalog:
+        discovered_suffixes = {_suffix_of(t, prefix) for t in master_data_types}
+        consistency_rules = sum(
+            len(r.get("non_negative", [])) + len(r.get("ordered", [])) + len(r.get("warn_zero", []))
+            for r in rules["types"].values()
+        )
+
+        # --- coverage: type-level rules -------------------------------------
+        for suffix, type_rules in rules["types"].items():
+            severity = type_rules.get("coverage")
+            if not severity:
+                continue
+            if suffix not in discovered_suffixes:
+                checks_skipped.append(
+                    f"coverage for {prefix}{suffix}: type not exposed by the service"
+                )
+                continue
+            coverage_summary["rules_evaluated"] += 1
+            if not rows_by_suffix.get(suffix):
+                coverage_summary["types_without_rows"].append(f"{prefix}{suffix}")
+                product_findings.append(_make_finding(
+                    severity, "NO_MASTER_DATA_FOR_PRODUCT",
+                    f"Product {product} has no records in {prefix}{suffix}.",
+                    f"{prefix}{suffix}",
+                ))
+
+        # --- coverage: at-least-one-of groups -------------------------------
+        for group in rules["coverage_groups"]:
+            present = [t for t in group["types"] if t in discovered_suffixes]
+            if not present:
+                checks_skipped.append(f"coverage group '{group['name']}': types not exposed")
+                continue
+            coverage_summary["rules_evaluated"] += 1
+            if not any(rows_by_suffix.get(t) for t in present):
+                product_findings.append(_make_finding(
+                    group.get("severity", "warning"), "COVERAGE_GAP",
+                    group.get("message")
+                    or f"Product {product} has no data in any of: "
+                       + ", ".join(f"{prefix}{t}" for t in present),
+                    f"{group['name']} ({', '.join(prefix + t for t in present)})",
+                ))
+
+        # --- referential: sources must point to a location-product ----------
+        lp_rows = rows_by_suffix.get("LOCATIONPRODUCT")
+        if "LOCATIONPRODUCT" in discovered_suffixes and "LOCATIONPRODUCT" not in truncated_suffixes:
+            lp_locations = {str(r.get("LOCID")) for r in lp_rows or [] if r.get("LOCID")}
+            for suffix, type_rules in rules["types"].items():
+                if not type_rules.get("location_must_exist_in_locationproduct"):
+                    continue
+                if suffix in truncated_suffixes:
+                    continue
+                for index, row in enumerate(rows_by_suffix.get(suffix, [])):
+                    loc = row.get("LOCID")
+                    if loc and str(loc) not in lp_locations:
+                        product_findings.append(_make_finding(
+                            "warning", "LOCATION_WITHOUT_LOCATION_PRODUCT",
+                            f"{prefix}{suffix} references location {loc}, but product "
+                            f"{product} has no {prefix}LOCATIONPRODUCT record there.",
+                            f"{prefix}{suffix}", row, index,
+                        ))
+        else:
+            checks_skipped.append("source-to-location-product check (location-product unavailable/truncated)")
+
+        # --- referential: values must exist in their master data ------------
+        values_by_master: dict[tuple, set] = {}
+        for suffix, rows in rows_by_suffix.items():
+            for row in rows:
+                for field, (master_suffix, key) in _REFERENCE_FIELDS.items():
+                    if suffix == master_suffix or _is_blank(row.get(field)):
+                        continue
+                    values_by_master.setdefault((master_suffix, key), set()).add(str(row[field]))
+        for (master_suffix, key), values in sorted(values_by_master.items()):
+            master_set = f"{prefix}{master_suffix}"
+            if master_set.upper() not in catalog["all_sets"]:
+                checks_skipped.append(f"referential check against {master_set}: type not exposed")
+                continue
+            notes: list[str] = []
+            found = _lookup_existing_values(
+                master_set, key, sorted(values), planning_area, version, notes
+            )
+            reference_summary[master_set] = len(values)
+            if found is None:
+                checks_skipped.extend(notes)
+                continue
+            for value in sorted(values - found):
+                product_findings.append(_make_finding(
+                    "error", "REFERENCE_NOT_FOUND",
+                    f"{key} {value} is used by product {product}'s master data but does "
+                    f"not exist in {master_set}.",
+                    master_set,
+                ))
+
+    error_count = sum(r["error_count"] for r in master_data_results) + sum(
+        f["severity"] == "error" for f in product_findings
+    )
+    warning_count = sum(r["warning_count"] for r in master_data_results) + sum(
+        f["severity"] == "warning" for f in product_findings
+    )
+
     return {
         "status": "completed",
+        "health": "errors" if error_count else "warnings" if warning_count else "clean",
         "product": product,
         "planning_area": planning_area,
         "version": version,
         "total_master_data_types": len(master_data_results),
         "total_rows_evaluated": total_rows,
-        "error_count": sum(result["error_count"] for result in master_data_results),
-        "warning_count": sum(result["warning_count"] for result in master_data_results),
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "product_level_findings": product_findings,
+        "checks_performed": {
+            "completeness": {
+                "metadata_mandatory_fields": catalog is not None,
+                "caller_required_attributes": user_required,
+            },
+            "coverage": coverage_summary,
+            "referential_lookups_values_checked": reference_summary,
+            "consistency_rules_evaluated": consistency_rules,
+            "skipped": sorted(set(checks_skipped)),
+        },
         "master_data_results": master_data_results,
         "source": "mock" if USE_MOCK_DATA else "live",
     }
