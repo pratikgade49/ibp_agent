@@ -1,7 +1,7 @@
 """
 LLM client wrapper -- provider-agnostic.
-Supports Anthropic (Claude), DeepSeek, and Gemini behind one interface. Set
-LLM_PROVIDER=anthropic|deepseek|gemini in the environment to choose.
+Supports Anthropic (Claude), AWS Bedrock, DeepSeek, and Gemini behind one
+interface. Set LLM_PROVIDER=anthropic|bedrock|deepseek|gemini to choose.
 DeepSeek's API is OpenAI-compatible but its tool-calling wire format is
 structurally different from Anthropic's (separate `tool_calls` array with
 JSON-string arguments, vs. Anthropic's inline `tool_use` content blocks;
@@ -280,6 +280,151 @@ class GeminiClient(LLMClient):
         return {"role": "assistant", "content": content}
 
 # ---------------------------------------------------------------------------
+# Amazon Bedrock -- Converse API translated to the common message format
+# ---------------------------------------------------------------------------
+class BedrockClient(LLMClient):
+    def __init__(self):
+        import boto3
+
+        self._region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        if not self._region:
+            raise RuntimeError("AWS_REGION (or AWS_DEFAULT_REGION) must be set for Bedrock.")
+        self._client = boto3.client("bedrock-runtime", region_name=self._region)
+        self._model = os.environ.get("BEDROCK_MODEL", "")
+        if not self._model:
+            raise RuntimeError("BEDROCK_MODEL must be set to an enabled Bedrock model ID.")
+
+    def chat(self, system: str, messages: list, tools: list, max_tokens: int = 1024) -> dict:
+        response = self._client.converse(
+            modelId=self._model,
+            system=[{"text": system}],
+            messages=self._to_bedrock_messages(messages),
+            toolConfig=self._to_bedrock_tool_config(tools),
+            inferenceConfig={"maxTokens": max_tokens},
+        )
+        return self._from_bedrock_response(response)
+
+    @staticmethod
+    def _to_bedrock_tool_config(tools: list) -> dict:
+        return {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": tool["name"],
+                        "description": tool["description"],
+                        "inputSchema": {"json": tool["input_schema"]},
+                    }
+                }
+                for tool in tools
+            ]
+        }
+
+    @staticmethod
+    def _to_bedrock_messages(messages: list) -> list:
+        converted = []
+        for message in messages:
+            if isinstance(message, dict):
+                role = message.get("role", "user")
+                content = message.get("content")
+                tool_calls = message.get("tool_calls", [])
+                tool_call_id = message.get("tool_call_id")
+            else:
+                role = {
+                    "human": "user",
+                    "ai": "assistant",
+                    "tool": "tool",
+                }.get(getattr(message, "type", ""), "user")
+                content = getattr(message, "content", None)
+                tool_calls = getattr(message, "tool_calls", [])
+                tool_call_id = getattr(message, "tool_call_id", None)
+
+            if role == "tool" and tool_call_id:
+                tool_content = content if isinstance(content, str) else json.dumps(content)
+                converted.append(
+                    {
+                        "role": "user",
+                        "content": [{
+                            "toolResult": {
+                                "toolUseId": tool_call_id,
+                                "content": [{"text": tool_content}],
+                            }
+                        }],
+                    }
+                )
+                continue
+
+            if isinstance(content, str):
+                converted.append(
+                    {
+                        "role": "assistant" if role == "assistant" else "user",
+                        "content": [{"text": content}],
+                    }
+                )
+                continue
+
+            blocks = []
+            for block in content or []:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    blocks.append({"text": block["text"]})
+                elif block_type == "tool_use":
+                    blocks.append(
+                        {
+                            "toolUse": {
+                                "toolUseId": block["id"],
+                                "name": block["name"],
+                                "input": block["input"],
+                            }
+                        }
+                    )
+                elif block_type == "tool_result":
+                    blocks.append(
+                        {
+                            "toolResult": {
+                                "toolUseId": block["tool_use_id"],
+                                "content": [{"text": block["content"]}],
+                            }
+                        }
+                    )
+
+            for tool_call in tool_calls:
+                blocks.append(
+                    {
+                        "toolUse": {
+                            "toolUseId": tool_call.get("id") or tool_call.get("tool_call_id"),
+                            "name": tool_call["name"],
+                            "input": tool_call.get("args", {}),
+                        }
+                    }
+                )
+
+            converted.append(
+                {"role": "assistant" if role == "assistant" else "user", "content": blocks}
+            )
+        return converted
+
+    @staticmethod
+    def _from_bedrock_response(response: dict) -> dict:
+        message = response.get("output", {}).get("message", {})
+        content = []
+        for block in message.get("content", []):
+            if "text" in block:
+                content.append({"type": "text", "text": block["text"]})
+            elif "toolUse" in block:
+                tool_use = block["toolUse"]
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_use["toolUseId"],
+                        "name": tool_use["name"],
+                        "input": tool_use.get("input", {}),
+                    }
+                )
+        return {"role": "assistant", "content": content}
+
+# ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
 def get_llm_client() -> LLMClient:
@@ -288,6 +433,8 @@ def get_llm_client() -> LLMClient:
         return AnthropicClient()
     if provider == "deepseek":
         return DeepSeekClient()
+    if provider == "bedrock":
+        return BedrockClient()
     if provider == "gemini":
         return GeminiClient()
     raise ValueError(f"Unknown LLM_PROVIDER: {provider}")

@@ -1,4 +1,5 @@
 .env
+.cf-vars.yml
 .venv/
 __pycache__/
 *.pyc

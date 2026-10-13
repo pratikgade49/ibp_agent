@@ -1,0 +1,16 @@
+# Copy to .cf-vars.yml and fill in the selected provider's settings.
+# Keep .cf-vars.yml private; it is excluded from Git and the CF upload.
+llm-provider: bedrock
+aws-region: us-east-1
+bedrock-model: "REPLACE_WITH_ENABLED_BEDROCK_MODEL_ID"
+aws-bearer-token-bedrock: "REPLACE_WITH_BEDROCK_API_KEY"
+google-api-key: ""
+gemini-model: gemini-3.6-flash
+anthropic-api-key: ""
+anthropic-model: claude-sonnet-4-6
+deepseek-api-key: ""
+deepseek-model: deepseek-chat
+s4-base-url: https://your-s4-host:44301
+s4-username: "REPLACE_WITH_S4_READ_USER"
+s4-password: "REPLACE_WITH_S4_PASSWORD"
+s4-api-timeout-seconds: "60"
