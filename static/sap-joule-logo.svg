@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="joule-bg" x1="10" y1="6" x2="120" y2="124" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7017F5" />
+      <stop offset="1" stop-color="#B000D9" />
+    </linearGradient>
+  </defs>
+  <path fill="url(#joule-bg)" d="M0 0h128v128H0z" />
+  <path fill="#fff" d="m47 42-16 23 32 44 32-44-16-23H47Z" />
+  <path fill="url(#joule-bg)" d="m63 59 5 9 9 5-9 5-5 9-5-9-9-5 9-5 5-9Z" />
+  <path fill="#fff" d="m51 8 3 8 8 3-8 3-3 8-3-8-8-3 8-3 3-8Z" />
+  <path fill="#fff" d="m34 32 2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6Z" />
+  <path fill="#fff" d="m116 27 2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5Z" />
+</svg>

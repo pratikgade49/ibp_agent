@@ -1,6 +1,8 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import jouleLogo from './assets/sap-joule-logo.svg';
+import planningAgentMark from './assets/planning-agent-mark.svg';
 import {
   Activity,
   ArrowDown,
@@ -78,6 +80,7 @@ function readConversations(): Conversation[] {
           return {
             id,
             conversationId: id,
+            agentMode: 'ibp',
             title: String(item.title || 'Planning conversation'),
             updatedAt: Number.isNaN(parsedDate.getTime()) ? new Date().toISOString() : parsedDate.toISOString(),
             messages,
@@ -97,6 +100,7 @@ function readConversations(): Conversation[] {
     return [{
       id,
       conversationId: id,
+        agentMode: 'ibp',
       title: getTitle(oldMessages.find((message) => message.role === 'user')?.content || 'Planning conversation'),
       updatedAt: new Date().toISOString(),
       messages: oldMessages,
@@ -370,6 +374,7 @@ function formatDate(value: string): string {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [agentMode, setAgentMode] = useState<'ibp' | 's4'>('ibp');
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [connection, setConnection] = useState<'connected' | 'running' | 'offline'>('connected');
@@ -403,6 +408,15 @@ export default function App() {
     setHistoryOpen(false);
   }
 
+  function selectAgentMode(mode: 'ibp' | 's4') {
+    if (mode === agentMode) return;
+    setAgentMode(mode);
+    if (activeConversation && (activeConversation.agentMode || 'ibp') !== mode) {
+      setActiveId(null);
+    }
+    setError('');
+  }
+
   async function submitQuestion(value: string) {
     const message = value.trim();
     if (!message || loading) return;
@@ -413,17 +427,18 @@ export default function App() {
 
     const existing = activeConversation;
     const conversationId = existing?.id || crypto.randomUUID();
+    const selectedMode = existing?.agentMode || agentMode;
     const now = new Date().toISOString();
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: 'user', content: message };
     const optimistic: Conversation = existing
       ? { ...existing, updatedAt: now, messages: [...existing.messages, userMessage] }
-      : { id: conversationId, title: getTitle(message), updatedAt: now, messages: [userMessage] };
+      : { id: conversationId, agentMode: selectedMode, title: getTitle(message), updatedAt: now, messages: [userMessage] };
 
     setActiveId(conversationId);
     saveConversation(optimistic);
 
     try {
-      const response = await fetch('/ask', {
+      const response = await fetch(selectedMode === 's4' ? '/s4/ask' : '/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, conversation_id: existing?.conversationId || null }),
@@ -476,12 +491,12 @@ export default function App() {
   return (
     <div className={`app-frame ${historyOpen ? 'history-open' : ''}`}>
       <header className="topbar">
+        <button className="icon-button mobile-history-toggle" aria-label="Toggle conversation history" onClick={() => setHistoryOpen(!historyOpen)}>
+          {historyOpen ? <X size={18} /> : <Menu size={18} />}
+        </button>
         <div className="brand-lockup">
-          <button className="icon-button mobile-history-toggle" aria-label="Toggle conversation history" onClick={() => setHistoryOpen(!historyOpen)}>
-            {historyOpen ? <X size={18} /> : <Menu size={18} />}
-          </button>
-          <div className="brand-mark"><Activity size={19} strokeWidth={2.2} /></div>
-          <div className="brand-copy"><strong>Demand Desk</strong><span>IBP / Planning workspace</span></div>
+          <div className="brand-mark"><img src={planningAgentMark} alt="Planning agent" /></div>
+          <div className="brand-copy"><strong>YASH-SAP AGENTIC AI DASHBOARD</strong><span>Planners Workspace</span></div>
         </div>
         <div className="topbar-right">
           <span className={`connection-state ${connection}`}><i />{connection === 'running' ? 'Analyzing' : connection === 'offline' ? 'Agent unavailable' : 'Agent connected'}</span>
@@ -501,7 +516,7 @@ export default function App() {
               <button
                 className={`history-entry ${conversation.id === activeId ? 'selected' : ''}`}
                 key={conversation.id}
-                onClick={() => { setActiveId(conversation.id); setError(''); setHistoryOpen(false); }}
+                onClick={() => { setActiveId(conversation.id); setAgentMode(conversation.agentMode || 'ibp'); setError(''); setHistoryOpen(false); }}
                 disabled={loading}
               >
                 <span className="history-entry-title">{conversation.title}</span>
@@ -553,26 +568,30 @@ export default function App() {
           )}
         </main>
 
-        <aside className="agent-panel" aria-label="Planning agent chat">
+        <aside className="agent-panel" aria-label={`${agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'} chat`}>
           <div className="agent-header">
-            <div className="agent-avatar"><Sparkles size={17} /></div>
-            <div className="agent-heading"><strong>Planning agent</strong><span><i /> Ready to analyze</span></div>
+            <div className="agent-avatar"><img src={jouleLogo} alt="SAP Joule" /></div>
+            <div className="agent-heading"><strong>{agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'}</strong><span><i /> Ready to analyze</span></div>
             <button className="icon-button panel-toggle" aria-label="Toggle conversation history" title="Conversation list" onClick={() => setHistoryOpen(!historyOpen)}><PanelLeftOpen size={17} /></button>
+          </div>
+          <div className="agent-mode" role="radiogroup" aria-label="Select agent">
+            <button type="button" role="radio" aria-checked={agentMode === 'ibp'} className={agentMode === 'ibp' ? 'selected' : ''} onClick={() => selectAgentMode('ibp')} disabled={loading}>IBP</button>
+            <button type="button" role="radio" aria-checked={agentMode === 's4'} className={agentMode === 's4' ? 'selected' : ''} onClick={() => selectAgentMode('s4')} disabled={loading}>S/4 Capacity</button>
           </div>
           <div className="chat-context"><span className="context-line" />{activeConversation ? activeConversation.title : 'New conversation'}</div>
           <div className="message-list" ref={messageListRef} aria-live="polite">
             {messages.length === 0 ? (
               <div className="chat-welcome">
                 <span className="welcome-glyph"><Sparkles size={19} /></span>
-                <h2>Good planning starts with a clear signal.</h2>
-                <p>Ask about forecasts, anomalies, data readiness, or capacity constraints.</p>
+                <h2>{agentMode === 's4' ? 'Read your S/4 capacity setup.' : 'Good planning starts with a clear signal.'}</h2>
+                <p>{agentMode === 's4' ? 'Inspect configured work-center capacity and shift intervals.' : 'Ask about forecasts, anomalies, data readiness, or capacity constraints.'}</p>
                 <div className="prompt-list">
-                  {PROMPTS.map((prompt) => <button key={prompt} onClick={() => void submitQuestion(prompt)} disabled={loading}>{prompt}<ArrowUpRight size={14} /></button>)}
+                  {(agentMode === 's4' ? ['Read capacity for RESOR_01 in plant PL01', 'Show capacity shifts for plant PL01'] : PROMPTS).map((prompt) => <button key={prompt} onClick={() => void submitQuestion(prompt)} disabled={loading}>{prompt}<ArrowUpRight size={14} /></button>)}
                 </div>
               </div>
             ) : messages.map((message) => (
               <article className={`message ${message.role}`} key={message.id}>
-                <span className="message-label">{message.role === 'user' ? 'You' : 'Planning agent'}</span>
+                <span className="message-label">{message.role === 'user' ? 'You' : agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'}</span>
                 {message.role === 'assistant'
                   ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                   : <p>{message.content}</p>}
@@ -589,14 +608,14 @@ export default function App() {
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
-                placeholder="Ask about your plan..."
+                placeholder={agentMode === 's4' ? 'Ask about work-center capacity...' : 'Ask about your plan...'}
                 rows={2}
-                aria-label="Message planning agent"
+                aria-label={`Message ${agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'}`}
                 disabled={loading}
               />
               <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
             </form>
-            <p className="privacy-note">Analysis is based on available planning data.</p>
+            <p className="privacy-note">{agentMode === 's4' ? 'Read-only S/4 capacity data.' : 'Analysis is based on available planning data.'}</p>
           </div>
         </aside>
       </div>
