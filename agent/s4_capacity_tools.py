@@ -1,8 +1,7 @@
 """Read SAP S/4HANA work-center capacity and shift configuration."""
 import os
-import re
-from urllib.parse import quote
-from datetime import datetime, timezone
+from urllib.parse import quote, urljoin
+from datetime import date, datetime, timedelta
 
 import requests
 from dotenv import load_dotenv
@@ -14,10 +13,6 @@ S4_USER = os.environ.get("S4_USER") or os.environ.get("S4_USERNAME", "")
 S4_PASSWORD = os.environ.get("S4_PASSWORD", "")
 S4_API_TIMEOUT_SECONDS = float(os.environ.get("S4_API_TIMEOUT_SECONDS", "30"))
 S4_WORK_CENTERS_ROOT = "/sap/opu/odata/sap/API_WORK_CENTERS"
-S4_PRODUCTION_ORDER_SERVICE_ROOT = os.environ.get(
-    "S4_PRODUCTION_ORDER_SERVICE_ROOT",
-    "/sap/opu/odata/sap/API_PRODUCTION_ORDER_2_SRV",
-).rstrip("/")
 
 
 def _odata_literal(value: str) -> str:
@@ -43,19 +38,52 @@ def _s4_get(
     if not S4_USER or not S4_PASSWORD:
         raise RuntimeError("S4_USER and S4_PASSWORD must be configured")
 
+    request_url = f"{S4_BASE_URL}{service_root}/{entity_path}"
+    request_options = {
+        "auth": (S4_USER, S4_PASSWORD),
+        "headers": {"Accept": "application/json"},
+        "timeout": S4_API_TIMEOUT_SECONDS,
+    }
     response = requests.get(
-        f"{S4_BASE_URL}{service_root}/{entity_path}",
+        request_url,
         params=params or {"$format": "json"},
-        auth=(S4_USER, S4_PASSWORD),
-        headers={"Accept": "application/json"},
-        timeout=S4_API_TIMEOUT_SECONDS,
+        **request_options,
     )
     if not response.ok:
         raise RuntimeError(
             f"S/4HANA capacity request failed with HTTP {response.status_code} "
             f"for {entity_path}: {response.text}"
         )
-    return response.json()
+
+    payload = response.json()
+    data = payload.get("d") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        return payload
+
+    rows = list(data["results"])
+    next_url = data.get("__next")
+    visited_urls = {request_url}
+    while next_url:
+        page_url = urljoin(request_url, next_url)
+        if page_url in visited_urls:
+            raise RuntimeError("S/4HANA capacity response repeated an OData next link")
+        visited_urls.add(page_url)
+        page_response = requests.get(page_url, **request_options)
+        if not page_response.ok:
+            raise RuntimeError(
+                f"S/4HANA capacity request failed with HTTP {page_response.status_code} "
+                f"for OData next link: {page_response.text}"
+            )
+        page_payload = page_response.json()
+        page_data = page_payload.get("d", page_payload)
+        if not isinstance(page_data, dict) or not isinstance(page_data.get("results"), list):
+            raise RuntimeError("S/4HANA capacity response contained an invalid OData page")
+        rows.extend(page_data["results"])
+        next_url = page_data.get("__next")
+
+    data["results"] = rows
+    data.pop("__next", None)
+    return payload
 
 
 def _clock_time(seconds: object) -> str | None:
@@ -108,25 +136,19 @@ def read_s4_work_center_capacities(
 ) -> dict:
     """Read work-center capacity headers and date/weekday shift records.
 
-    At least one of plant or work_center is required to keep reads scoped.
-    This tool is read-only and does not evaluate order load or change SAP data.
+    Plant and work_center are optional; omitting both reads all accessible
+    work centers. This tool is read-only and does not evaluate order load or
+    change SAP data.
     """
-    if not plant and not work_center:
-        raise ValueError("provide a plant or work_center to scope the capacity read")
-
     filters = []
     if plant:
         filters.append(f"Plant eq '{_odata_literal(plant)}'")
     if work_center:
         filters.append(f"WorkCenter eq '{_odata_literal(work_center)}'")
-    work_center_payload = _s4_get(
-        "A_WorkCenters",
-        {
-            "$filter": " and ".join(filters),
-            "$top": 200,
-            "$format": "json",
-        },
-    )
+    query_params = {"$top": 200, "$format": "json"}
+    if filters:
+        query_params["$filter"] = " and ".join(filters)
+    work_center_payload = _s4_get("A_WorkCenters", query_params)
     work_center_rows = _collection_rows(work_center_payload)
     collection_data = work_center_payload.get("d", work_center_payload)
     work_center_list_truncated = bool(
@@ -196,126 +218,148 @@ def read_s4_work_center_capacities(
     }
 
 
-def _sap_date(value: object) -> str | None:
-    if not isinstance(value, str) or not value:
+def _evaluation_parameter_path(
+    entity_set: str,
+    start_date: str,
+    end_date: str,
+    bucket_type: str,
+) -> str:
+    for label, value in (("start_date", start_date), ("end_date", end_date)):
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must use YYYY-MM-DD format") from exc
+    if start_date > end_date:
+        raise ValueError("start_date must not be after end_date")
+    if not bucket_type or len(bucket_type) != 1:
+        raise ValueError("bucket_type must be a one-character SAP bucket code")
+
+    return (
+        f"{entity_set}(P_CapEvalStartDate=datetime'{start_date}T00:00:00',"
+        f"P_CapEvalEndDate=datetime'{end_date}T00:00:00',"
+        f"P_CapEvalBucketType='{_odata_literal(bucket_type)}')/Set"
+    )
+
+
+def _float_or_none(value: object) -> float | None:
+    if value in (None, ""):
         return None
-    match = re.fullmatch(r"/Date\((-?\d+)(?:[+-]\d+)?\)/", value)
-    if match:
-        return datetime.fromtimestamp(
-            int(match.group(1)) / 1000, tz=timezone.utc
-        ).date().isoformat()
-    if len(value) >= 10 and value[4] == "-":
-        return value[:10]
-    return None
+    return float(value)
 
 
-def _operation_is_excluded(operation: dict) -> bool:
-    return any(
-        str(operation.get(field, "")).upper() == "X"
-        for field in (
-            "OperationIsDeleted",
-            "OperationIsTechlyCompleted",
-            "OperationIsClosed",
-            "OperationIsDelivered",
+def analyze_s4_capacity_load(
+    plant: str | None = None,
+    work_center: str | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    bucket_type: str = "D",
+) -> dict:
+    """Read evaluated capacity for a period, optionally scoped to plant/work center."""
+    date_range_defaulted = not start_date or not end_date
+    if not start_date:
+        start_date = date.today().isoformat()
+    if not end_date:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_date = (start + timedelta(days=29)).isoformat()
+
+    filters = []
+    if plant:
+        filters.append(f"Plant eq '{_odata_literal(plant)}'")
+    if work_center:
+        filters.append(f"WorkCenter eq '{_odata_literal(work_center)}'")
+    query_params = {"$format": "json"}
+    if filters:
+        query_params["$filter"] = " and ".join(filters)
+    evaluation_path = _evaluation_parameter_path(
+        "A_WorkCenterCapPerBucket", start_date, end_date, bucket_type
+    )
+    contributor_path = _evaluation_parameter_path(
+        "A_WorkCenterCapOrderPerBucket", start_date, end_date, bucket_type
+    )
+    aggregate_rows = _collection_rows(
+        _s4_get(
+            evaluation_path,
+            query_params,
+        )
+    )
+    contributor_rows = _collection_rows(
+        _s4_get(
+            contributor_path,
+            query_params,
         )
     )
 
+    evaluations = []
+    for row in aggregate_rows:
+        required = _float_or_none(row.get("WorkCenterCapRqmtInCapUnit"))
+        available = _float_or_none(row.get("WorkCenterAvailableCapacity"))
+        remaining = _float_or_none(row.get("WrkCtrRmngCapInCapUnit"))
+        utilization = _float_or_none(row.get("WorkCenterTotUtilznInTmePerd"))
+        if utilization is not None and utilization <= 10:
+            utilization *= 100
+        if utilization is None and required is not None and available:
+            utilization = required / available * 100
 
-def analyze_s4_capacity_load(plant: str, work_center: str) -> dict:
-    """Read operation standard hours for a work center and group them by date.
-
-    The result is read-only. Standard-work hours are grouped by scheduled
-    execution start date, not apportioned across a multi-day execution window.
-    Shift hours are returned as context; no overload status is inferred until
-    calendar and weekday semantics are confirmed.
-    """
-    if not plant or not work_center:
-        raise ValueError("plant and work_center are both required")
-
-    filters = (
-        f"ProductionPlant eq '{_odata_literal(plant)}' and "
-        f"WorkCenter eq '{_odata_literal(work_center)}'"
-    )
-    payload = _s4_get(
-        "A_ProductionOrderOperation_2",
-        {"$filter": filters, "$top": 500, "$format": "json"},
-        service_root=S4_PRODUCTION_ORDER_SERVICE_ROOT,
-    )
-    operations = _collection_rows(payload)
-    collection_data = payload.get("d", payload)
-    operations_truncated = bool(
-        isinstance(collection_data, dict) and collection_data.get("__next")
-    )
-
-    grouped: dict[str, dict] = {}
-    missing_hours_count = 0
-    missing_date_count = 0
-    excluded_operation_count = 0
-    for operation in operations:
-        if _operation_is_excluded(operation):
-            excluded_operation_count += 1
-            continue
-
-        start_date = _sap_date(operation.get("OpErlstSchedldExecStrtDte"))
-        hours_value = operation.get("WorkCenterStandardWorkQty2")
-        hours_unit = (
-            operation.get("StdWrkQtyUnit2SAPCode")
-            or operation.get("WorkCenterStandardWorkQtyUnit2")
-        )
-        if start_date is None:
-            missing_date_count += 1
-            continue
-        if hours_value in (None, "") or str(hours_unit).upper() not in {"H", "HR", "HUR"}:
-            missing_hours_count += 1
-            continue
-
-        hours = float(hours_value)
-        item = grouped.setdefault(
-            start_date,
+        evaluations.append(
             {
-                "date": start_date,
-                "work_center": work_center,
-                "plant": plant,
-                "required_hours": 0.0,
-                "operation_count": 0,
-                "orders": [],
-            },
+                "date": row.get("CapacityEvaluationTimePeriod"),
+                "date_text": row.get("CapacityEvaluationTimePerdText"),
+                "plant": row.get("Plant"),
+                "work_center": row.get("WorkCenter"),
+                "capacity_internal_id": row.get("CapacityInternalID"),
+                "capacity_category_allocation": row.get("CapacityCategoryAllocation"),
+                "shift_name": row.get("ShiftName"),
+                "capacity_start_time_seconds": row.get("CapacityStartTime"),
+                "capacity_end_time_seconds": row.get("CapacityEndTime"),
+                "required_capacity": required,
+                "available_capacity": available,
+                "remaining_capacity": remaining,
+                "utilization_percent": round(utilization, 1) if utilization is not None else None,
+                "capacity_unit": row.get("WorkCenterCapacityUnit"),
+                "status": (
+                    "overloaded"
+                    if remaining is not None and remaining < 0
+                    else "within_capacity"
+                    if remaining is not None
+                    else "capacity_data_incomplete"
+                ),
+            }
         )
-        item["required_hours"] += hours
-        item["operation_count"] += 1
-        order_id = operation.get("ManufacturingOrder")
-        if order_id and order_id not in item["orders"]:
-            item["orders"].append(order_id)
 
-    capacity_result = read_s4_work_center_capacities(
-        plant=plant,
-        work_center=work_center,
-    )
-    capacity_rows = capacity_result.get("work_centers", [])
+    contributors = [
+        {
+            "date": row.get("CapacityEvaluationTimePeriod"),
+            "plant": row.get("Plant"),
+            "work_center": row.get("WorkCenter"),
+            "order_id": row.get("OrderID"),
+            "operation": row.get("Operation"),
+            "material": row.get("Material"),
+            "order_status": row.get("OrderStatusText"),
+            "operation_status": row.get("OperationPlanningStatusText"),
+            "required_capacity": _float_or_none(row.get("WorkCenterCapRqmtInCapUnit")),
+            "available_capacity": _float_or_none(row.get("WorkCenterAvailableCapacity")),
+            "capacity_unit": row.get("WorkCenterCapacityUnit"),
+        }
+        for row in contributor_rows
+    ]
+
     return {
         "status": "completed",
         "read_only": True,
+        "source": "SAP evaluated capacity API",
         "plant": plant,
         "work_center": work_center,
-        "operation_count": len(operations) - excluded_operation_count,
-        "excluded_operation_count": excluded_operation_count,
-        "missing_hours_count": missing_hours_count,
-        "missing_date_count": missing_date_count,
-        "operations_truncated": operations_truncated,
-        "capacity_calendar_complete": False,
-        "capacity_note": (
-            "Operation standard-work hours are grouped by scheduled start date; "
-            "they are not apportioned across multi-day execution windows. Shift "
-            "hours are included for reference. Weekday mapping and factory "
-            "calendar applicability have not yet been validated, so no overload "
-            "status is inferred."
+        "evaluation": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "bucket_type": bucket_type,
+            "date_range_defaulted": date_range_defaulted,
+        },
+        "capacity_evaluations": evaluations,
+        "evaluated_bucket_dates": sorted(
+            {str(row["date"]) for row in evaluations if row.get("date")}
         ),
-        "work_centers": capacity_rows,
-        "daily_load": [
-            {
-                **row,
-                "required_hours": round(row["required_hours"], 3),
-            }
-            for _, row in sorted(grouped.items())
-        ],
+        "contributors": contributors,
+        "evaluation_count": len(evaluations),
+        "contributor_count": len(contributors),
     }

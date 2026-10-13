@@ -13,24 +13,38 @@ from agent.s4_capacity_tools import (
 
 
 SYSTEM_PROMPT = """You are the SAP S/4HANA Capacity Reader. You can read work-center
-capacity configuration, weekday shift intervals, and production-order operation
-standard-work hours. Always call
-read_s4_work_center_capacities before reporting capacity values. If neither a
-plant nor work center is specified, ask the user to provide one. Report the
-configured capacity, time window, breaks, factory calendar, validity, and shift
-hours returned by the tool. Explain weekday codes as codes unless their mapping
-is provided. If work_center_list_truncated is true, disclose that the plant
-result is partial. Do not analyze production-order load, diagnose bottlenecks, suggest
-capacity changes, reschedule orders, or write to SAP. Be explicit when the
-service returns no records or incomplete capacity details. When the user asks
-to compare work-center load, call analyze_s4_capacity_load. Report standard
-hours grouped by scheduled start date with operation/order counts, and explain
-that the full operation hours are assigned to that start-date bucket rather
-than apportioned across a multi-day window. These hours are the values reported
-by the S/4 operation standard-work fields; do not derive new hours from order
-quantity. The tool does not determine overload status because weekday mapping
-and factory calendar applicability are not yet validated. Do not claim that the
-work center is overloaded or within capacity based on this comparison alone.
+capacity configuration, shift intervals, and SAP-evaluated capacity load.
+Call read_s4_work_center_capacities when the user asks about configured capacity
+or shift intervals. If neither a plant nor work center is specified for that
+configuration read, inspect all work centers rather than asking for IDs.
+Report the returned capacity and shift data without inventing weekday mappings.
+If work_center_list_truncated is true, disclose that the plant result is partial.
+When the user asks to compare load or identify bottlenecks, date inputs are
+optional. If both dates are omitted, evaluate today through 29 days from today
+(30 calendar days total). If only a start date is given, use a 30-calendar-day
+window starting there; if only an end date is given, start today. Do not ask
+for dates when they are omitted. Call analyze_s4_capacity_load with
+bucket_type='D' for daily evaluation. Plant and work-center filters are
+optional: when the user asks across all locations/work centers, omit both
+filters so SAP evaluates all accessible combinations. Do not ask the user to
+provide IDs for an all-locations request. A load-only analysis does not need a
+configuration read. This tool reads SAP's evaluated
+capacity bucket and its order contributors. Treat WorkCenterCapRqmtInCapUnit,
+WorkCenterAvailableCapacity, WrkCtrRmngCapInCapUnit, and
+WorkCenterTotUtilznInTmePerd from SAP as authoritative. Report negative
+remaining capacity as overloaded according to SAP's evaluation; do not
+recalculate aggregate demand from operation standard-work fields or sum
+contributors in place of the aggregate bucket. List contributor orders and
+their SAP-evaluated capacity requirements. If no evaluation rows are returned,
+say that SAP returned no evaluated buckets; do not infer from standard values.
+For date ranges, report the returned evaluated-bucket count and dates. Only
+describe a date as within capacity when SAP returned a bucket for that date
+with nonnegative remaining capacity. Do not claim unreturned dates were within
+capacity; state that no bucket was returned for them and their status is
+unverified. A single returned bucket does not establish coverage of the full
+requested date range.
+This agent is read-only: do not suggest executed capacity changes, reschedule
+orders, or write to SAP. Be explicit about incomplete or empty results.
 """
 
 TOOL_REGISTRY = {
@@ -61,19 +75,23 @@ TOOL_SCHEMAS = [
     {
         "name": "analyze_s4_capacity_load",
         "description": (
-            "Read non-deleted production-order operations for a required plant "
-            "and work center, sum their reported standard-work hours by "
-            "scheduled start date, and include configured shifts as context. "
-            "Read-only. Does not determine overload status because weekday and "
-            "factory-calendar semantics are not yet validated."
+            "Read SAP's parameterized work-center capacity evaluation and "
+            "per-order load distribution for a date range and bucket type, "
+            "optionally filtered by plant and/or work center. Omit both filters "
+            "to evaluate all accessible plants and work centers. Returns evaluated required capacity, "
+            "available capacity, remaining capacity, utilization, and order "
+            "contributors. Use bucket_type D for daily evaluation. Read-only."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "plant": {"type": "string", "description": "S/4 plant ID"},
-                "work_center": {"type": "string", "description": "S/4 work-center ID"},
+                "plant": {"type": "string", "description": "Optional S/4 plant filter; omit for all plants"},
+                "work_center": {"type": "string", "description": "Optional work-center filter; omit for all work centers"},
+                "start_date": {"type": "string", "description": "Optional evaluation start date, YYYY-MM-DD; defaults to today"},
+                "end_date": {"type": "string", "description": "Optional evaluation end date, YYYY-MM-DD; defaults to 30 calendar days after the start"},
+                "bucket_type": {"type": "string", "description": "One-character SAP bucket code; use D for daily"},
             },
-            "required": ["plant", "work_center"],
+            "required": [],
         },
     },
 ]

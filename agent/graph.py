@@ -50,6 +50,10 @@ resource_type argument. The tool uses IBP key figures CAPADEMAND and CAPAUSAGE
 for handling/storage, PCAPADEMAND and PCAPAUSAGE for production,
 and TCAPADEMAND and TCAPAUSAGE for transportation, with CAPASUPPLY as the
 capacity-supply key figure.
+This agent evaluates SAP IBP planning key figures only. If the user explicitly
+asks for SAP S/4HANA capacity or identifies the resource as a S/4 work center,
+do not call analyze_capacity_bottlenecks or present an IBP result. Tell the user
+to select the S/4 Capacity agent, which reads SAP-evaluated work-center buckets.
 Use CAPACONSUMPTION for handling/storage, PCAPACONSUMPTION for production,
 and TCAPACONSUMPTION for transportation when explaining the capacity demand
 rate. Handling and storage are resource-location-product analyses; production
