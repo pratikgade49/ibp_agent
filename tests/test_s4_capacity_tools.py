@@ -76,6 +76,64 @@ class S4CapacityReaderTests(unittest.TestCase):
         shift_call = get.call_args_list[2]
         self.assertIn("CapacityActiveVersion eq '3'", shift_call.kwargs["params"]["$filter"])
 
+    @patch.object(tools, "S4_BASE_URL", "https://s4.example")
+    @patch.object(tools, "S4_USER", "reader")
+    @patch.object(tools, "S4_PASSWORD", "secret")
+    @patch.object(tools, "read_s4_work_center_capacities")
+    def test_load_sums_operation_hours_by_scheduled_start_date(self, read_capacity):
+        read_capacity.return_value = {
+            "work_centers": [{
+                "work_center": "RESOR_01",
+                "capacity": {"number_of_capacities": 1},
+                "shifts": [{"operating_hours": "8.000"}],
+            }]
+        }
+        operations = [
+            {
+                "ManufacturingOrder": "1001782",
+                "ProductionPlant": "PL01",
+                "WorkCenter": "RESOR_01",
+                "OpErlstSchedldExecStrtDte": "/Date(1792713600000)/",
+                "WorkCenterStandardWorkQty2": "4.000",
+                "StdWrkQtyUnit2SAPCode": "H",
+            },
+            {
+                "ManufacturingOrder": "1001783",
+                "ProductionPlant": "PL01",
+                "WorkCenter": "RESOR_01",
+                "OpErlstSchedldExecStrtDte": "/Date(1792713600000)/",
+                "WorkCenterStandardWorkQty2": "4.000",
+                "StdWrkQtyUnit2SAPCode": "H",
+            },
+            {
+                "ManufacturingOrder": "1001784",
+                "ProductionPlant": "PL01",
+                "WorkCenter": "RESOR_01",
+                "OpErlstSchedldExecStrtDte": "/Date(1792800000000)/",
+                "WorkCenterStandardWorkQty2": "6.000",
+                "StdWrkQtyUnit2SAPCode": "H",
+            },
+        ]
+        with patch.object(
+            tools,
+            "_s4_get",
+            return_value={"d": {"results": operations}},
+        ) as get:
+            result = tools.analyze_s4_capacity_load("PL01", "RESOR_01")
+
+        self.assertEqual(result["daily_load"][0]["required_hours"], 8.0)
+        self.assertEqual(result["daily_load"][0]["operation_count"], 2)
+        self.assertEqual(result["daily_load"][0]["orders"], ["1001782", "1001783"])
+        self.assertFalse(result["capacity_calendar_complete"])
+        operation_call = get.call_args_list[0]
+        self.assertIn("ProductionPlant eq 'PL01'", operation_call.args[1]["$filter"])
+        self.assertEqual(operation_call.kwargs["service_root"], tools.S4_PRODUCTION_ORDER_SERVICE_ROOT)
+        read_capacity.assert_called_once_with(plant="PL01", work_center="RESOR_01")
+
+    def test_load_requires_plant_and_work_center(self):
+        with self.assertRaisesRegex(ValueError, "plant and work_center are both required"):
+            tools.analyze_s4_capacity_load("PL01", "")
+
 
 if __name__ == "__main__":
     unittest.main()
