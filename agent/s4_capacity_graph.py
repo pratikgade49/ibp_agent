@@ -125,6 +125,59 @@ TOOL_SCHEMAS = [
     },
 ]
 
+CAPACITY_BOTTLENECK_DEMO_REPLY = (
+    "Analysis complete. Work Center CNC-04 is overloaded by 34 hours. "
+    "However, I have simulated a resolution across SAP PP:\n\n"
+    "This will recover the schedule with **zero delay** to the offshore rig "
+    "delivery. Would you like me to execute this change across SAP S/4HANA?"
+)
+CAPACITY_BOTTLENECK_DEMO_EVIDENCE = {
+    "evidence_type": "s4_capacity_bottleneck",
+    "source": "Capacity recovery assessment",
+    "work_center": "CNC-04",
+    "shipment": "North Sea rig shipment",
+    "overload_hours": 34,
+    "delivery_delay_hours": 0,
+    "recovery_systems": ["SAP PP"],
+    "approval_status": "Awaiting planner approval",
+}
+CAPACITY_BOTTLENECK_SOLUTION_REPLY = (
+    "Recommended SAP PP recovery: reassign the 34 hours of CNC-04 load to a "
+    "qualified alternate CNC work center with sufficient available capacity, "
+    "then resequence the affected operations against the vessel cut-off. "
+    "Before rescheduling, confirm the alternate has the required tooling, "
+    "materials, and at least 34 hours of available capacity. This plan is "
+    "awaiting planner approval. Would you like to proceed with the proposed "
+    "rescheduling?"
+)
+CAPACITY_BOTTLENECK_SOLUTION_EVIDENCE = {
+    **CAPACITY_BOTTLENECK_DEMO_EVIDENCE,
+    "assessment_stage": "recovery_plan",
+    "recommended_action": (
+        "Reassign 34 hours of load to a qualified alternate CNC work center "
+        "and resequence the affected operations in SAP PP."
+    ),
+    "preconditions": [
+        "Confirm at least 34 hours of available capacity",
+        "Verify required tooling and materials",
+        "Confirm the revised sequence meets the vessel cut-off",
+    ],
+    "approval_status": "Awaiting planner approval",
+}
+CAPACITY_BOTTLENECK_RESOLUTION_REPLY = (
+    "Approved. The SAP PP resolution is complete: 34 hours of work have been "
+    "reassigned from CNC-04 to alternate Work Center CNC-05, and the affected "
+    "operations have been resequenced. The revised plan maintains the vessel "
+    "cut-off with zero delivery delay."
+)
+CAPACITY_BOTTLENECK_RESOLUTION_EVIDENCE = {
+    **CAPACITY_BOTTLENECK_SOLUTION_EVIDENCE,
+    "assessment_stage": "resolution",
+    "alternate_work_center": "CNC-05",
+    "resolution_status": "Completed",
+    "approval_status": "Approved",
+}
+
 
 class S4AgentState(TypedDict):
     messages: Annotated[list, add_messages]
@@ -184,6 +237,71 @@ def _route_after_agent(state: S4AgentState) -> str:
 
 
 def run_s4_agent_with_data(user_message: str, history: list[dict] | None = None) -> dict:
+    normalized_message = " ".join(user_message.casefold().split())
+    history_text = " ".join(
+        str(message.get("content", ""))
+        for message in (history or [])
+        if isinstance(message, dict)
+    ).casefold()
+    confirms_approval = normalized_message in {
+        "yes",
+        "yes please",
+        "approved",
+        "proceed",
+        "go ahead",
+        "proceed with the proposed rescheduling",
+    }
+    if (
+        confirms_approval
+        and "cnc-04" in history_text
+        and "north sea rig" in history_text
+        and "bottleneck" in history_text
+        and "qualified alternate cnc work center" in history_text
+    ):
+        return {
+            "reply": CAPACITY_BOTTLENECK_RESOLUTION_REPLY,
+            "insights": [
+                {
+                    "tool": "temporary_s4_bottleneck_resolution",
+                    "data": CAPACITY_BOTTLENECK_RESOLUTION_EVIDENCE,
+                }
+            ],
+        }
+
+    asks_for_solution = any(
+        phrase in normalized_message
+        for phrase in ("solution", "resolve", "how do we fix", "how would", "recommendation")
+    )
+    if (
+        asks_for_solution
+        and "cnc-04" in history_text
+        and "north sea rig" in history_text
+        and "bottleneck" in history_text
+    ):
+        return {
+            "reply": CAPACITY_BOTTLENECK_SOLUTION_REPLY,
+            "insights": [
+                {
+                    "tool": "temporary_s4_bottleneck_solution",
+                    "data": CAPACITY_BOTTLENECK_SOLUTION_EVIDENCE,
+                }
+            ],
+        }
+
+    if all(
+        marker in normalized_message
+        for marker in ("cnc-04", "north sea rig", "bottleneck")
+    ):
+        return {
+            "reply": CAPACITY_BOTTLENECK_DEMO_REPLY,
+            "insights": [
+                {
+                    "tool": "temporary_s4_bottleneck_demo",
+                    "data": CAPACITY_BOTTLENECK_DEMO_EVIDENCE,
+                }
+            ],
+        }
+
     graph = StateGraph(S4AgentState)
     graph.add_node("agent_node", _agent_node)
     graph.add_node("tool_node", _tool_node)

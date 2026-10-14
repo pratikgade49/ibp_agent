@@ -125,6 +125,7 @@ function isUsefulData(data: DataRecord | undefined): data is DataRecord {
         Array.isArray(data.results) ||
         Array.isArray(data.alert_results) ||
         Array.isArray(data.anomalies) ||
+        data.evidence_type === 's4_capacity_bottleneck' ||
         typeof data.ready === 'boolean' ||
         data.key_figures),
   );
@@ -282,10 +283,60 @@ function CapacityEvidence({ data }: { data: DataRecord }) {
   );
 }
 
+function S4CapacityBottleneckEvidence({ data }: { data: DataRecord }) {
+  const recoverySystems = Array.isArray(data.recovery_systems)
+    ? data.recovery_systems.join(' + ')
+    : 'N/A';
+  const rows = [
+    { Signal: 'Work center', Value: data.work_center },
+    { Signal: 'Shipment', Value: data.shipment },
+    { Signal: 'Capacity gap', Value: `${formatValue(data.overload_hours)} h` },
+    { Signal: 'Vessel cut-off impact', Value: `${formatValue(data.delivery_delay_hours)} h delay` },
+    { Signal: 'Recovery path', Value: recoverySystems },
+    ...(data.alternate_work_center ? [{ Signal: 'Alternate work center', Value: data.alternate_work_center }] : []),
+    ...(data.recommended_action ? [{ Signal: 'Recommended action', Value: data.recommended_action }] : []),
+    ...(Array.isArray(data.preconditions)
+      ? [{ Signal: 'Preconditions', Value: data.preconditions.join('; ') }]
+      : []),
+    { Signal: 'Resolution status', Value: data.resolution_status || data.approval_status },
+  ];
+
+  return (
+    <>
+      <MetricStrip items={[
+        { label: 'Overload', value: `${formatValue(data.overload_hours)} h`, tone: 'alert' },
+        { label: 'Cut-off impact', value: `${formatValue(data.delivery_delay_hours)} h delay` },
+        { label: 'Recovery path', value: recoverySystems },
+        { label: 'Decision', value: data.resolution_status || data.approval_status || 'Pending approval' },
+      ]} />
+      <section className="evidence-section">
+        <div className="section-heading">
+          <div>
+            <span className="section-kicker">
+              {data.assessment_stage === 'resolution'
+                ? 'SAP PP resolution'
+                : data.assessment_stage === 'recovery_plan'
+                  ? 'Proposed SAP PP recovery plan'
+                  : 'Capacity recovery assessment'}
+            </span>
+            <h3>CNC-04 bottleneck resolution</h3>
+          </div>
+          <span className="row-count">{String(data.resolution_status || data.approval_status || 'Pending approval')}</span>
+        </div>
+        <DataTable rows={rows} columns={['Signal', 'Value']} />
+      </section>
+    </>
+  );
+}
+
 function Evidence({ data }: { data: DataRecord }) {
   const results = asRecords(data.results);
   const alerts = asRecords(data.alert_results);
   const anomalies = asRecords(data.anomalies);
+
+  if (data.evidence_type === 's4_capacity_bottleneck') {
+    return <S4CapacityBottleneckEvidence data={data} />;
+  }
 
   if (data.master_data_type && Array.isArray(data.results)) {
     return <HealthCheckEvidence data={data} />;
