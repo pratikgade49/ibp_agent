@@ -931,7 +931,7 @@ def run_product_master_data_health_check(
 
         result, rows = _master_data_health_check_core(
             master_data_type=master_data_type,
-            planning_area=planning_area,
+            planning_area=planning_area_value,
             version=version,
             filters=[f"PRDID eq '{product}'"],
             attributes=attributes,
@@ -1043,7 +1043,7 @@ def run_product_master_data_health_check(
                 continue
             notes: list[str] = []
             found = _lookup_existing_values(
-                master_set, key, sorted(values), planning_area, version, notes
+                master_set, key, sorted(values), planning_area_value, version, notes
             )
             reference_summary[master_set] = len(values)
             if found is None:
@@ -1068,7 +1068,7 @@ def run_product_master_data_health_check(
         "status": "completed",
         "health": "errors" if error_count else "warnings" if warning_count else "clean",
         "product": product,
-        "planning_area": planning_area,
+        "planning_area": planning_area_value,
         "version": version,
         "total_master_data_types": len(master_data_results),
         "total_rows_evaluated": total_rows,
@@ -1087,6 +1087,109 @@ def run_product_master_data_health_check(
         },
         "master_data_results": master_data_results,
         "source": "mock" if USE_MOCK_DATA else "live",
+    }
+
+
+def check_product_demand_planning_readiness(
+    product: str,
+    target_period: str | None = None,
+    planning_area: str | None = None,
+    version: str | None = None,
+    max_results: int = 100,
+) -> dict:
+    """Check both product master-data health and current-period actuals."""
+    master_data = run_product_master_data_health_check(
+        product=product,
+        planning_area=planning_area,
+        version=version,
+        max_results=max_results,
+    )
+    actual_quantity = get_sales_history_status(
+        target_period=target_period,
+        product=product,
+        result_scope="product",
+    )
+
+    skipped_checks = master_data.get("checks_performed", {}).get("skipped", [])
+    master_data_complete = (
+        master_data.get("status") == "completed" and not skipped_checks
+    )
+    master_data_ready = master_data_complete and master_data.get("error_count", 0) == 0
+    actual_quantity_ready = actual_quantity.get("ready", False)
+
+    recommended_actions = []
+    if not master_data_complete:
+        if skipped_checks:
+            recommended_actions.append(
+                "Resolve or investigate the skipped master-data checks, then rerun the readiness check."
+            )
+        else:
+            recommended_actions.append(
+                "Resolve the master-data health-check failure, then rerun the readiness check."
+            )
+    elif not master_data_ready:
+        findings = list(master_data.get("product_level_findings", []))
+        findings.extend(
+            finding
+            for result in master_data.get("master_data_results", [])
+            for finding in result.get("results", [])
+            if finding.get("severity") == "error"
+        )
+        finding_messages = [finding.get("message") for finding in findings if finding.get("message")]
+        action = "Correct the reported master-data errors and rerun the readiness check."
+        if finding_messages:
+            action = "Correct the reported master-data errors: " + " ".join(finding_messages)
+        recommended_actions.append(action)
+
+    warning_messages = [
+        finding.get("message")
+        for finding in master_data.get("product_level_findings", [])
+        if finding.get("severity") == "warning" and finding.get("message")
+    ]
+    warning_messages.extend(
+        finding.get("message")
+        for result in master_data.get("master_data_results", [])
+        for finding in result.get("results", [])
+        if finding.get("severity") == "warning" and finding.get("message")
+    )
+    if master_data.get("warning_count", 0):
+        detail = " ".join(warning_messages)
+        recommended_actions.append(
+            "Review the master-data warnings, confirm flagged values are intentional, and correct them if needed."
+            + (f" Findings: {detail}" if detail else "")
+        )
+
+    if not actual_quantity_ready:
+        target_period = actual_quantity.get("target_period")
+        last_loaded_period = actual_quantity.get("last_loaded_period")
+        if last_loaded_period:
+            recommended_actions.append(
+                f"Load or correct ACTUALSQTY for {product} in target period {target_period}; "
+                f"historical actuals are available through {last_loaded_period}."
+            )
+        else:
+            recommended_actions.append(
+                f"Load and verify ACTUALSQTY history for {product}, including target period "
+                f"{target_period}; check the product, planning-area, and UOM mappings if data is expected."
+            )
+
+    if not master_data_complete:
+        overall_status = "incomplete"
+    elif not master_data_ready or not actual_quantity_ready:
+        overall_status = "not_ready"
+    elif master_data.get("warning_count", 0):
+        overall_status = "ready_with_warnings"
+    else:
+        overall_status = "ready"
+
+    return {
+        "product": product,
+        "overall_status": overall_status,
+        "master_data_ready": master_data_ready,
+        "actual_quantity_ready": actual_quantity_ready,
+        "recommended_actions": recommended_actions,
+        "master_data": master_data,
+        "actual_quantity": actual_quantity,
     }
 
 

@@ -1,10 +1,64 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from agent import tools
+from agent import graph, tools
 
 
 class MasterDataHealthCheckTests(unittest.TestCase):
+    @patch.object(
+        tools,
+        "get_sales_history_status",
+        return_value={"ready": False, "target_period": "2026-10"},
+    )
+    @patch.object(
+        tools,
+        "run_product_master_data_health_check",
+        return_value={
+            "status": "completed",
+            "error_count": 0,
+            "warning_count": 1,
+            "checks_performed": {"skipped": []},
+        },
+    )
+    def test_readiness_requires_actual_quantity_even_with_only_master_data_warning(
+        self, master_data_check, sales_history_check
+    ):
+        result = tools.check_product_demand_planning_readiness(
+            product="TestFG01",
+            target_period="2026-10",
+        )
+
+        self.assertEqual(result["overall_status"], "not_ready")
+        self.assertTrue(result["master_data_ready"])
+        self.assertFalse(result["actual_quantity_ready"])
+        self.assertTrue(
+            any("ACTUALSQTY" in action for action in result["recommended_actions"])
+        )
+        self.assertTrue(
+            any("warnings" in action for action in result["recommended_actions"])
+        )
+        master_data_check.assert_called_once_with(
+            product="TestFG01",
+            planning_area=None,
+            version=None,
+            max_results=100,
+        )
+        sales_history_check.assert_called_once_with(
+            target_period="2026-10",
+            product="TestFG01",
+            result_scope="product",
+        )
+
+    def test_combined_readiness_check_is_registered_as_agent_tool(self):
+        self.assertIs(
+            graph.TOOL_REGISTRY["check_product_demand_planning_readiness"],
+            tools.check_product_demand_planning_readiness,
+        )
+        self.assertIn(
+            "check_product_demand_planning_readiness",
+            {schema["name"] for schema in graph.TOOL_SCHEMAS},
+        )
+
     def test_mock_health_check_runs_local_quality_checks(self):
         result = tools.run_master_data_health_check(
             master_data_type="LOCATIONPRODUCT",
@@ -310,6 +364,30 @@ class ProductHealthRulesTests(unittest.TestCase):
         self.assertEqual(result["warning_count"], 0)
         self.assertTrue(result["checks_performed"]["completeness"]["metadata_mandatory_fields"])
         self.assertIn("ZJPLOCATION", result["checks_performed"]["referential_lookups_values_checked"])
+
+    def test_default_planning_area_is_used_for_product_extraction(self):
+        data = {
+            "ZJPPRODUCT": [{"PRDID": "TestFG01", "UOMID": "EA", "PRDDESCR": "FG"}],
+            "ZJPLOCATIONPRODUCT": [{"LOCID": "1010", "PRDID": "TestFG01"}],
+            "ZJPSOURCEPRODUCTION": [{
+                "LOCID": "1010", "PRDID": "TestFG01", "PLEADTIME": "2",
+                "PMINLOTSIZE": "10", "PMAXLOTSIZE": "0",
+            }],
+        }
+        with (
+            patch.object(tools, "IBP_PLANNING_AREA", "ZJPIBP1"),
+            patch.object(tools.requests, "get", side_effect=_route(data)) as get_response,
+        ):
+            result = tools.run_product_master_data_health_check(product="TestFG01")
+
+        self.assertEqual(result["planning_area"], "ZJPIBP1")
+        self.assertEqual(result["health"], "clean")
+        self.assertTrue(
+            all(
+                "PlanningAreaID eq 'ZJPIBP1'" in call.kwargs["params"]["$filter"]
+                for call in get_response.call_args_list[1:]
+            )
+        )
 
 
 if __name__ == "__main__":

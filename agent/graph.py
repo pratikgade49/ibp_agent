@@ -29,11 +29,12 @@ from agent.tools import (
     import_master_data,
     run_master_data_health_check,
     run_product_master_data_health_check,
+    check_product_demand_planning_readiness,
 )
 SYSTEM_PROMPT = """You are the IBP Demand Planning Agent. You help demand \
 planners validate data, monitor consumption variance, detect forecast \
 anomalies, and run master-data health checks in SAP Integrated Business Planning.
-You have thirteen tools available. Decide which tool(s) to call and in what \
+You have fifteen tools available. Decide which tool(s) to call and in what \
 order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
 For master-data health checks, use run_product_master_data_health_check when \
@@ -44,6 +45,12 @@ Use run_master_data_health_check only when the user explicitly supplies a \
 master-data type. Both tools are read-only and return normalized errors and \
 warnings. Do not claim that a health check passed unless the returned status is \
 completed and the error_count is zero.
+For questions asking whether a product is ready for Demand Planning, always \
+call check_product_demand_planning_readiness. It checks both product master data \
+and ACTUALSQTY availability for the target period. Do not answer readiness from \
+the master-data health check alone. Report master-data status and actual-quantity \
+readiness separately; if actual_quantity_ready is false, the product is not ready. \
+Report every item in recommended_actions as the resolution guidance.
 For capacity questions, use analyze_capacity_bottlenecks. Match natural-language
 resource terms such as production, storage, handling, transport, or all to the
 resource_type argument. The tool uses IBP key figures CAPADEMAND and CAPAUSAGE
@@ -126,6 +133,10 @@ does not poll asynchronous SAP processing status.
 For import_master_data, always summarize the master data type, attributes,
 record count, and whether this is an import or deletion. Call it only after
 the user explicitly confirms the exact operation.
+For any tool result that identifies an issue, include a concise practical \
+resolution recommendation in the final response. Report any returned \
+recommended_actions and tool-produced recommendation summaries/actions. Do not \
+imply that a recommendation has been executed; follow confirmation rules before writes.
 """
 TOOL_REGISTRY = {
     "analyze_capacity_bottlenecks": analyze_capacity_bottlenecks,
@@ -142,8 +153,24 @@ TOOL_REGISTRY = {
     "import_master_data": import_master_data,
     "run_master_data_health_check": run_master_data_health_check,
     "run_product_master_data_health_check": run_product_master_data_health_check,
+    "check_product_demand_planning_readiness": check_product_demand_planning_readiness,
     }
 TOOL_SCHEMAS = [
+   {
+       "name": "check_product_demand_planning_readiness",
+       "description": "Check whether a product is ready for Demand Planning by combining all related product master-data checks with ACTUALSQTY availability for the target period. Use this for product readiness questions; do not substitute a master-data-only check. Returns overall_status, master_data_ready, actual_quantity_ready, detailed master_data findings, and actual_quantity history status.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "product": {"type": "string", "description": "Product ID to check"},
+               "target_period": {"type": "string", "description": "Optional target period in YYYY-MM format; defaults to the current month"},
+               "planning_area": {"type": "string", "description": "Optional planning area ID"},
+               "version": {"type": "string", "description": "Optional planning-area version ID"},
+               "max_results": {"type": "integer", "description": "Maximum extracted records per master-data type, from 1 to 1000", "minimum": 1, "maximum": 1000},
+           },
+           "required": ["product"],
+       },
+   },
    {
        "name": "run_product_master_data_health_check",
        "description": "Discover all SAP IBP master-data entity sets that contain PRDID, extract each entity for the requested product, and run local read-only checks: completeness (mandatory fields from service metadata plus any required_attributes), coverage (product exists in product master and location-product, has a source of supply), referential integrity (locations, customers, resources, currencies, etc. exist in their masters), and consistency (negative values, invalid ranges, valid-from after valid-to). The result lists checks_performed and checks_skipped; report both, and do not call data healthy if checks were skipped. Use when the user supplies only a product ID and wants all related master data checked. Uses MASTER_DATA_API_SRV metadata and records through the existing Destination credentials; no separate health-check URL is required.",

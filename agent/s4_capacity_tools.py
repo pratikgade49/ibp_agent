@@ -13,6 +13,7 @@ S4_USER = os.environ.get("S4_USER") or os.environ.get("S4_USERNAME", "")
 S4_PASSWORD = os.environ.get("S4_PASSWORD", "")
 S4_API_TIMEOUT_SECONDS = float(os.environ.get("S4_API_TIMEOUT_SECONDS", "30"))
 S4_WORK_CENTERS_ROOT = "/sap/opu/odata/sap/API_WORK_CENTERS"
+S4_WORK_CENTERS_UI_ROOT = "/sap/opu/odata/sap/UI_WORKCENTERS"
 
 
 def _odata_literal(value: str) -> str:
@@ -300,8 +301,7 @@ def analyze_s4_capacity_load(
         if utilization is None and required is not None and available:
             utilization = required / available * 100
 
-        evaluations.append(
-            {
+        evaluation = {
                 "date": row.get("CapacityEvaluationTimePeriod"),
                 "date_text": row.get("CapacityEvaluationTimePerdText"),
                 "plant": row.get("Plant"),
@@ -324,7 +324,12 @@ def analyze_s4_capacity_load(
                     else "capacity_data_incomplete"
                 ),
             }
-        )
+        if evaluation["status"] == "overloaded":
+            evaluation["recommended_actions"] = [
+                "Check the SAP work-center group for configured alternate work centers, then verify their capacity before proposing a move.",
+                "Do not move or dispatch the operation automatically; confirm the selected alternate and schedule with the planner.",
+            ]
+        evaluations.append(evaluation)
 
     contributors = [
         {
@@ -341,6 +346,18 @@ def analyze_s4_capacity_load(
             "capacity_unit": row.get("WorkCenterCapacityUnit"),
         }
         for row in contributor_rows
+    ]
+
+    recommendations = [
+        {
+            "date": evaluation.get("date"),
+            "plant": evaluation.get("plant"),
+            "work_center": evaluation.get("work_center"),
+            "remaining_capacity": evaluation.get("remaining_capacity"),
+            "recommended_actions": evaluation.get("recommended_actions", []),
+        }
+        for evaluation in evaluations
+        if evaluation.get("status") == "overloaded"
     ]
 
     return {
@@ -362,4 +379,169 @@ def analyze_s4_capacity_load(
         "contributors": contributors,
         "evaluation_count": len(evaluations),
         "contributor_count": len(contributors),
+        "recommendations": recommendations,
+    }
+
+
+def recommend_s4_group_alternates(
+    plant: str,
+    work_center: str,
+    evaluation_date: str,
+) -> dict:
+    """Read alternate work centers from configured work-center groups and check capacity."""
+    if not plant or not work_center:
+        raise ValueError("plant and work_center are required")
+    try:
+        datetime.strptime(evaluation_date, "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("evaluation_date must use YYYY-MM-DD format") from exc
+
+    source_rows = _collection_rows(
+        _s4_get(
+            "A_WorkCenters",
+            {
+                "$filter": (
+                    f"Plant eq '{_odata_literal(plant)}' and "
+                    f"WorkCenter eq '{_odata_literal(work_center)}'"
+                ),
+                "$format": "json",
+            },
+        )
+    )
+    if not source_rows:
+        return {
+            "status": "not_found",
+            "read_only": True,
+            "plant": plant,
+            "work_center": work_center,
+            "evaluation_date": evaluation_date,
+            "alternate_count": 0,
+            "alternates": [],
+            "message": "The requested work center was not found in SAP work-center master data.",
+        }
+
+    source = source_rows[0]
+    source_internal_id = source.get("WorkCenterInternalID")
+    source_type = source.get("WorkCenterTypeCode")
+    if not source_internal_id or not source_type:
+        raise RuntimeError("SAP work-center master data is missing the internal ID or type code")
+
+    group_rows = _collection_rows(
+        _s4_get(
+            "WorkCenterGroupWhereUsed",
+            {
+                "$filter": (
+                    f"Plant eq '{_odata_literal(plant)}' and "
+                    f"WorkCenterInternalID eq '{_odata_literal(str(source_internal_id))}' and "
+                    f"WorkCenterTypeCode eq '{_odata_literal(str(source_type))}'"
+                ),
+                "$format": "json",
+            },
+            service_root=S4_WORK_CENTERS_UI_ROOT,
+        )
+    )
+
+    all_plant_centers = _collection_rows(
+        _s4_get(
+            "A_WorkCenters",
+            {
+                "$filter": f"Plant eq '{_odata_literal(plant)}'",
+                "$format": "json",
+            },
+        )
+    )
+    centers_by_identity = {
+        (str(row.get("WorkCenterInternalID")), str(row.get("WorkCenterTypeCode"))): row
+        for row in all_plant_centers
+        if row.get("WorkCenterInternalID") and row.get("WorkCenterTypeCode")
+    }
+
+    candidate_identities = set()
+    group_summaries = []
+    for group in group_rows:
+        group_id = group.get("WorkCenterGroupInternalID")
+        group_type = group.get("WorkCenterGroupTypeCode")
+        if not group_id or not group_type:
+            continue
+        group_summaries.append(
+            {
+                "group_id": group_id,
+                "group_type_code": group_type,
+                "group": group.get("WorkCenterGroup"),
+                "description": group.get("WorkCenterGroupDescription"),
+            }
+        )
+        tree_rows = _collection_rows(
+            _s4_get(
+                "WorkCenterGroupTreeAggrgn",
+                {
+                    "$filter": (
+                        f"WorkCenterGroupInternalID eq '{_odata_literal(str(group_id))}'"
+                    ),
+                    "$format": "json",
+                },
+                service_root=S4_WORK_CENTERS_UI_ROOT,
+            )
+        )
+        for tree_row in tree_rows:
+            member_id = tree_row.get("WorkCenterInternalID")
+            member_type = tree_row.get("WorkCenterTypeCode") or source_type
+            if member_id:
+                candidate_identities.add((str(member_id), str(member_type)))
+
+    candidate_identities.discard((str(source_internal_id), str(source_type)))
+    alternates = []
+    for identity in sorted(candidate_identities):
+        member = centers_by_identity.get(identity)
+        if member is None:
+            continue
+        alternate_name = member.get("WorkCenter")
+        if not alternate_name:
+            continue
+        capacity_result = analyze_s4_capacity_load(
+            plant=plant,
+            work_center=alternate_name,
+            start_date=evaluation_date,
+            end_date=evaluation_date,
+            bucket_type="D",
+        )
+        capacity_rows = capacity_result["capacity_evaluations"]
+        if not capacity_rows:
+            capacity_status = "capacity_not_evaluated"
+        elif any(row["status"] == "overloaded" for row in capacity_rows):
+            capacity_status = "overloaded"
+        elif all(
+            row.get("remaining_capacity") is not None
+            and row["remaining_capacity"] >= 0
+            for row in capacity_rows
+        ):
+            capacity_status = "within_capacity"
+        else:
+            capacity_status = "capacity_data_incomplete"
+        alternates.append(
+            {
+                "work_center": alternate_name,
+                "description": member.get("WorkCenterDesc"),
+                "work_center_internal_id": member.get("WorkCenterInternalID"),
+                "work_center_type_code": member.get("WorkCenterTypeCode"),
+                "capacity_status": capacity_status,
+                "capacity_evaluations": capacity_rows,
+            }
+        )
+
+    return {
+        "status": "completed",
+        "read_only": True,
+        "plant": plant,
+        "work_center": work_center,
+        "evaluation_date": evaluation_date,
+        "alternate_source": "SAP work-center group membership",
+        "groups": group_summaries,
+        "alternate_count": len(alternates),
+        "alternates": alternates,
+        "message": (
+            None
+            if alternates
+            else "No alternate work centers are assigned through a work-center group in SAP."
+        ),
     }

@@ -102,6 +102,96 @@ class S4CapacityReaderTests(unittest.TestCase):
         self.assertEqual(get.call_args_list[0].args[1], {"$format": "json"})
         self.assertEqual(get.call_args_list[1].args[1], {"$format": "json"})
 
+    def test_group_alternate_lookup_checks_capacity_for_other_members(self):
+        current_center = {
+            "WorkCenterInternalID": "10000288",
+            "WorkCenterTypeCode": "A",
+            "WorkCenter": "WCEN003",
+            "Plant": "PL01",
+        }
+        group = {
+            "WorkCenterGroupInternalID": "GRP00001",
+            "WorkCenterGroupTypeCode": "01",
+            "WorkCenterGroup": "LINE01",
+            "WorkCenterGroupDescription": "Line 01 Alternates",
+        }
+        centers = [
+            current_center,
+            {
+                "WorkCenterInternalID": "10000289",
+                "WorkCenterTypeCode": "A",
+                "WorkCenter": "WCEN004",
+                "WorkCenterDesc": "Alternate Center",
+                "Plant": "PL01",
+            },
+        ]
+        tree = [
+            {"WorkCenterInternalID": "10000288"},
+            {"WorkCenterInternalID": "10000289"},
+        ]
+        with patch.object(
+            tools,
+            "_s4_get",
+            side_effect=[
+                {"d": {"results": [current_center]}},
+                {"d": {"results": [group]}},
+                {"d": {"results": centers}},
+                {"d": {"results": tree}},
+            ],
+        ) as get, patch.object(
+            tools,
+            "analyze_s4_capacity_load",
+            return_value={
+                "capacity_evaluations": [
+                    {
+                        "date": "20261023",
+                        "remaining_capacity": 4.0,
+                        "status": "within_capacity",
+                    }
+                ]
+            },
+        ) as analyze:
+            result = tools.recommend_s4_group_alternates(
+                "PL01", "WCEN003", "2026-10-23"
+            )
+
+        self.assertEqual(result["alternate_source"], "SAP work-center group membership")
+        self.assertEqual(result["alternate_count"], 1)
+        self.assertEqual(result["alternates"][0]["work_center"], "WCEN004")
+        self.assertEqual(result["alternates"][0]["capacity_status"], "within_capacity")
+        self.assertEqual(get.call_args_list[1].kwargs["service_root"], tools.S4_WORK_CENTERS_UI_ROOT)
+        analyze.assert_called_once_with(
+            plant="PL01",
+            work_center="WCEN004",
+            start_date="2026-10-23",
+            end_date="2026-10-23",
+            bucket_type="D",
+        )
+
+    def test_group_alternate_lookup_reports_no_group_members(self):
+        current_center = {
+            "WorkCenterInternalID": "10000288",
+            "WorkCenterTypeCode": "A",
+            "WorkCenter": "WCEN003",
+            "Plant": "PL01",
+        }
+        with patch.object(
+            tools,
+            "_s4_get",
+            side_effect=[
+                {"d": {"results": [current_center]}},
+                {"d": {"results": []}},
+                {"d": {"results": [current_center]}},
+            ],
+        ):
+            result = tools.recommend_s4_group_alternates(
+                "PL01", "WCEN003", "2026-10-23"
+            )
+
+        self.assertEqual(result["alternate_count"], 0)
+        self.assertEqual(result["alternates"], [])
+        self.assertIn("No alternate work centers", result["message"])
+
     @patch.object(tools, "S4_BASE_URL", "https://s4.example")
     @patch.object(tools, "S4_USER", "reader")
     @patch.object(tools, "S4_PASSWORD", "secret")
@@ -253,6 +343,9 @@ class S4CapacityReaderTests(unittest.TestCase):
         self.assertEqual(evaluation["remaining_capacity"], -8.0)
         self.assertEqual(evaluation["utilization_percent"], 200.0)
         self.assertEqual(evaluation["status"], "overloaded")
+        self.assertIn("recommended_actions", evaluation)
+        self.assertEqual(len(result["recommendations"]), 1)
+        self.assertEqual(result["recommendations"][0]["remaining_capacity"], -8.0)
         self.assertEqual(result["contributor_count"], 2)
         self.assertEqual(
             {row["order_id"] for row in result["contributors"]},

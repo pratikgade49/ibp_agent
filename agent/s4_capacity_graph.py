@@ -8,6 +8,7 @@ from langgraph.graph.message import add_messages
 from agent.llm import get_llm_client
 from agent.s4_capacity_tools import (
     analyze_s4_capacity_load,
+    recommend_s4_group_alternates,
     read_s4_work_center_capacities,
 )
 
@@ -43,13 +44,24 @@ with nonnegative remaining capacity. Do not claim unreturned dates were within
 capacity; state that no bucket was returned for them and their status is
 unverified. A single returned bucket does not establish coverage of the full
 requested date range.
-This agent is read-only: do not suggest executed capacity changes, reschedule
-orders, or write to SAP. Be explicit about incomplete or empty results.
+For every overloaded bucket, report its recommended_actions in the same
+response. They are advisory next steps only: do not imply that any order was
+rescheduled or any capacity changed, and never write to SAP. Recommend moving
+orders only to dates with SAP-returned nonnegative remaining capacity. Be
+explicit about incomplete or empty results.
+When an overloaded work center needs an alternate, call
+recommend_s4_group_alternates for the same plant, work center, and overload
+date. It reads SAP work-center group membership, checks each other member's
+evaluated capacity, and returns only configured group members. Do not infer
+alternates from work-center category or similarity. If no group membership is
+returned, state that SAP has no group-defined alternate for the work center.
+This is advisory and read-only; never dispatch or reschedule an operation.
 """
 
 TOOL_REGISTRY = {
     "read_s4_work_center_capacities": read_s4_work_center_capacities,
     "analyze_s4_capacity_load": analyze_s4_capacity_load,
+    "recommend_s4_group_alternates": recommend_s4_group_alternates,
 }
 
 TOOL_SCHEMAS = [
@@ -92,6 +104,23 @@ TOOL_SCHEMAS = [
                 "bucket_type": {"type": "string", "description": "One-character SAP bucket code; use D for daily"},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "recommend_s4_group_alternates",
+        "description": (
+            "Find work centers assigned to the same SAP work-center group as "
+            "the specified work center and evaluate each candidate's capacity "
+            "on a date. Returns configured group members only; read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plant": {"type": "string", "description": "S/4 plant ID"},
+                "work_center": {"type": "string", "description": "Overloaded work-center ID"},
+                "evaluation_date": {"type": "string", "description": "Overload date, YYYY-MM-DD"},
+            },
+            "required": ["plant", "work_center", "evaluation_date"],
         },
     },
 ]
