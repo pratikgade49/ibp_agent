@@ -8,6 +8,7 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/ask': 'http://127.0.0.1:8080',
       '/s4': 'http://127.0.0.1:8080',
+      '/sales': 'http://127.0.0.1:8080',
       '/health': 'http://127.0.0.1:8080',
     },
   },

@@ -120,7 +120,7 @@ tbody tr:hover { background: #fafcfb; }
 .agent-heading span { color: #7f8b83; font-size: 10px; display: flex; align-items: center; gap: 5px; }
 .agent-heading i { width: 5px; height: 5px; }
 .panel-toggle { width: 30px; height: 30px; }
-.agent-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 9px 13px 0; padding: 3px; border: 1px solid #e5eae5; border-radius: 6px; background: #f6f8f6; }
+.agent-mode { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin: 9px 13px 0; padding: 3px; border: 1px solid #e5eae5; border-radius: 6px; background: #f6f8f6; }
 .agent-mode button { min-height: 30px; border: 0; border-radius: 4px; background: transparent; color: #65736a; font-size: 10px; font-weight: 600; cursor: pointer; }
 .agent-mode button.selected { background: #fff; color: var(--green); box-shadow: 0 1px 3px rgba(36, 55, 44, .12); }
 .agent-mode button:disabled { cursor: default; opacity: .65; }

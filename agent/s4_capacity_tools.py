@@ -1,6 +1,7 @@
 """Read SAP S/4HANA work-center capacity and shift configuration."""
+import json
 import os
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit
 from datetime import date, datetime, timedelta
 
 import requests
@@ -11,6 +12,7 @@ load_dotenv()
 S4_BASE_URL = os.environ.get("S4_BASE_URL", "").rstrip("/")
 S4_USER = os.environ.get("S4_USER") or os.environ.get("S4_USERNAME", "")
 S4_PASSWORD = os.environ.get("S4_PASSWORD", "")
+S4_DESTINATION_NAME = os.environ.get("S4_DESTINATION_NAME", "").strip()
 S4_API_TIMEOUT_SECONDS = float(os.environ.get("S4_API_TIMEOUT_SECONDS", "30"))
 S4_WORK_CENTERS_ROOT = "/sap/opu/odata/sap/API_WORK_CENTERS"
 S4_WORK_CENTERS_UI_ROOT = "/sap/opu/odata/sap/UI_WORKCENTERS"
@@ -29,22 +31,187 @@ def _collection_rows(payload: dict) -> list[dict]:
     return []
 
 
+def _bound_service_credentials(service_label: str) -> dict:
+    raw_bindings = os.environ.get("VCAP_SERVICES", "")
+    if not raw_bindings:
+        raise RuntimeError(
+            f"The {service_label} service is not bound to this application"
+        )
+    try:
+        bindings = json.loads(raw_bindings)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("VCAP_SERVICES is not valid JSON") from exc
+
+    candidates = bindings.get(service_label, [])
+    for service in candidates:
+        if service.get("label") == service_label:
+            credentials = service.get("credentials")
+            if isinstance(credentials, dict):
+                return credentials
+    for services in bindings.values():
+        for service in services:
+            if service.get("label") == service_label:
+                credentials = service.get("credentials")
+                if isinstance(credentials, dict):
+                    return credentials
+    raise RuntimeError(
+        f"The {service_label} service is not bound to this application"
+    )
+
+
+def _oauth_token_endpoint(value: str) -> str:
+    endpoint = value.strip().rstrip("/")
+    if not endpoint:
+        raise RuntimeError("OAuth token endpoint is not configured")
+    if not endpoint.endswith("/oauth/token"):
+        endpoint = f"{endpoint}/oauth/token"
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("OAuth token endpoint must be an absolute HTTP(S) URL")
+    return endpoint
+
+
+def _service_oauth_url(credentials: dict, service_label: str) -> str:
+    uaa = credentials.get("uaa")
+    if not isinstance(uaa, dict):
+        uaa = {}
+    for candidate in (
+        uaa.get("token_service_url"),
+        uaa.get("url"),
+        credentials.get("token_service_url"),
+        credentials.get("url"),
+    ):
+        if candidate:
+            return _oauth_token_endpoint(str(candidate))
+
+    uaadomain = uaa.get("uaadomain") or credentials.get("uaadomain")
+    if uaadomain:
+        authority = str(uaadomain).strip().rstrip("/")
+        if "://" not in authority:
+            authority = f"https://{authority}"
+        return _oauth_token_endpoint(authority)
+
+    raise RuntimeError(
+        f"{service_label} binding is missing its OAuth URL; expected "
+        "credentials.uaa.url, credentials.token_service_url, or credentials.uaadomain"
+    )
+
+
+def _oauth_access_token(
+    token_url: str,
+    client_id: str,
+    client_secret: str,
+    service_label: str,
+) -> str:
+    response = requests.post(
+        _oauth_token_endpoint(token_url),
+        data={"grant_type": "client_credentials"},
+        auth=(client_id, client_secret),
+        timeout=S4_API_TIMEOUT_SECONDS,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"Could not obtain {service_label} access token "
+            f"(HTTP {response.status_code})"
+        )
+    token = response.json().get("access_token")
+    if not token:
+        raise RuntimeError(f"{service_label} token response did not include access_token")
+    return token
+
+
+def _onpremise_destination_request_config() -> tuple[str, dict]:
+    destination_credentials = _bound_service_credentials("destination")
+    uaa = destination_credentials.get("uaa")
+    if not isinstance(uaa, dict):
+        uaa = {}
+    destination_token = _oauth_access_token(
+        _service_oauth_url(destination_credentials, "Destination service"),
+        uaa.get("clientid", destination_credentials.get("clientid", "")),
+        uaa.get("clientsecret", destination_credentials.get("clientsecret", "")),
+        "Destination service",
+    )
+    destination_url = (
+        f"{destination_credentials.get('uri', '').rstrip('/')}/destination-configuration"
+        f"/v1/destinations/{quote(S4_DESTINATION_NAME, safe='')}"
+    )
+    destination_response = requests.get(
+        destination_url,
+        headers={"Authorization": f"Bearer {destination_token}"},
+        timeout=S4_API_TIMEOUT_SECONDS,
+    )
+    if not destination_response.ok:
+        raise RuntimeError(
+            f"Could not resolve destination {S4_DESTINATION_NAME} "
+            f"(HTTP {destination_response.status_code})"
+        )
+    destination = destination_response.json().get("destinationConfiguration", {})
+    if destination.get("ProxyType", "").lower() != "onpremise":
+        raise RuntimeError(
+            f"Destination {S4_DESTINATION_NAME} must use ProxyType=OnPremise"
+        )
+    if destination.get("Authentication") != "BasicAuthentication":
+        raise RuntimeError(
+            f"Destination {S4_DESTINATION_NAME} must use BasicAuthentication"
+        )
+    base_url = destination.get("URL", "").rstrip("/")
+    username = destination.get("User")
+    password = destination.get("Password")
+    if not base_url or not username or not password:
+        raise RuntimeError(
+            f"Destination {S4_DESTINATION_NAME} must provide URL and Basic credentials"
+        )
+
+    connectivity_credentials = _bound_service_credentials("connectivity")
+    connectivity_token = _oauth_access_token(
+        connectivity_credentials.get("token_service_url")
+        or _service_oauth_url(connectivity_credentials, "Connectivity service"),
+        connectivity_credentials.get("clientid", ""),
+        connectivity_credentials.get("clientsecret", ""),
+        "Connectivity service",
+    )
+    proxy_host = connectivity_credentials.get("onpremise_proxy_host")
+    proxy_port = connectivity_credentials.get("onpremise_proxy_port")
+    if not proxy_host or not proxy_port:
+        raise RuntimeError(
+            "Connectivity binding is missing on-premise proxy host or port"
+        )
+    proxy_url = f"http://{proxy_host}:{proxy_port}"
+    headers = {
+        "Accept": "application/json",
+        "Proxy-Authorization": f"Bearer {connectivity_token}",
+    }
+    location_id = destination.get("CloudConnectorLocationId")
+    if location_id:
+        headers["SAP-Connectivity-SCC-Location_ID"] = location_id
+    return base_url, {
+        "auth": (username, password),
+        "headers": headers,
+        "proxies": {"http": proxy_url, "https": proxy_url},
+        "timeout": S4_API_TIMEOUT_SECONDS,
+    }
+
+
 def _s4_get(
     entity_path: str,
     params: dict | None = None,
     service_root: str = S4_WORK_CENTERS_ROOT,
 ) -> dict:
-    if not S4_BASE_URL:
-        raise RuntimeError("S4_BASE_URL is not configured")
-    if not S4_USER or not S4_PASSWORD:
-        raise RuntimeError("S4_USER and S4_PASSWORD must be configured")
+    if S4_DESTINATION_NAME:
+        base_url, request_options = _onpremise_destination_request_config()
+    else:
+        if not S4_BASE_URL:
+            raise RuntimeError("S4_BASE_URL is not configured")
+        if not S4_USER or not S4_PASSWORD:
+            raise RuntimeError("S4_USER and S4_PASSWORD must be configured")
+        base_url = S4_BASE_URL
+        request_options = {
+            "auth": (S4_USER, S4_PASSWORD),
+            "headers": {"Accept": "application/json"},
+            "timeout": S4_API_TIMEOUT_SECONDS,
+        }
 
-    request_url = f"{S4_BASE_URL}{service_root}/{entity_path}"
-    request_options = {
-        "auth": (S4_USER, S4_PASSWORD),
-        "headers": {"Accept": "application/json"},
-        "timeout": S4_API_TIMEOUT_SECONDS,
-    }
+    request_url = f"{base_url}{service_root}/{entity_path}"
     response = requests.get(
         request_url,
         params=params or {"$format": "json"},

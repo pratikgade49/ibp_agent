@@ -1708,12 +1708,18 @@ def analyze_capacity_bottlenecks(
             }
 
         if resource is not None and len(deduped) > 1:
+            source_ids = sorted({
+                source_id
+                for item in deduped
+                for source_id in item.get("source_ids", [])
+            })
             merged = {
                 "resource_type": "all",
                 "resource": resource,
                 "location": deduped[0].get("location"),
                 "period": deduped[0].get("period"),
-                "source": next((item.get("source") for item in deduped if item.get("source") is not None), None),
+                "source": ", ".join(source_ids) if source_ids else None,
+                "source_ids": source_ids,
                 "supply_location": next((item.get("supply_location") for item in deduped if item.get("supply_location") is not None), None),
                 "ship_from_location": next((item.get("ship_from_location") for item in deduped if item.get("ship_from_location") is not None), None),
                 "mode_of_transport": next((item.get("mode_of_transport") for item in deduped if item.get("mode_of_transport") is not None), None),
@@ -1823,6 +1829,45 @@ def analyze_capacity_bottlenecks(
             )
         if product:
             filters.append(f"PRDID eq '{_display_id(product)}'")
+
+        def number(field_value) -> float | None:
+            if field_value is None or str(field_value).strip() == "":
+                return None
+            try:
+                return float(field_value)
+            except (TypeError, ValueError):
+                return None
+
+        source_grain_production = (
+            "production" in requested_types
+            and "production" in CAPACITY_SOURCE_TYPES
+        )
+        supply_by_key = {}
+        if source_grain_production:
+            supply_filters = [
+                filter_value for filter_value in filters
+                if not (product and filter_value == f"PRDID eq '{_display_id(product)}'")
+            ]
+            supply_select = ",".join((
+                CAPACITY_RESOURCE_FIELD,
+                "LOCID",
+                timestamp_field,
+                CAPACITY_SUPPLY_KEY_FIGURE,
+            ))
+            supply_result = _ibp_get(
+                select=supply_select,
+                filter_=" and ".join(supply_filters),
+            )
+            for supply_raw in supply_result.get("d", {}).get("results", []):
+                supply_key = (
+                    supply_raw.get(CAPACITY_RESOURCE_FIELD),
+                    supply_raw.get("LOCID"),
+                    _period_month(supply_raw.get(timestamp_field)),
+                )
+                supply_by_key[supply_key] = number(
+                    supply_raw.get(CAPACITY_SUPPLY_KEY_FIGURE)
+                )
+
         result = _ibp_get(select=select_fields, filter_=" and ".join(filters))
         for raw in result.get("d", {}).get("results", []):
             for current_type in requested_types:
@@ -1834,15 +1879,6 @@ def analyze_capacity_bottlenecks(
                 )
                 if not raw_has_type_data:
                     continue
-
-                def number(field: str) -> float | None:
-                    value = raw.get(field)
-                    if value is None or str(value).strip() == "":
-                        return None
-                    try:
-                        return float(value)
-                    except (TypeError, ValueError):
-                        return None
                 raw_location = raw.get("LOCID")
                 is_transport_supply_row = (
                     current_type == "transportation"
@@ -1859,6 +1895,13 @@ def analyze_capacity_bottlenecks(
                         break
                     except (TypeError, ValueError):
                         continue
+                supply_value = number(raw.get(CAPACITY_SUPPLY_KEY_FIGURE))
+                if source_grain_production:
+                    supply_value = supply_by_key.get((
+                        raw.get(CAPACITY_RESOURCE_FIELD),
+                        raw_location,
+                        _period_month(raw.get(timestamp_field)),
+                    ))
                 rows.append({
                     "resource_type": current_type,
                     "resource": raw.get(CAPACITY_RESOURCE_FIELD),
@@ -1872,11 +1915,11 @@ def analyze_capacity_bottlenecks(
                     "ship_from_location": raw.get(CAPACITY_SHIP_FROM_FIELD),
                     "mode_of_transport": raw.get(CAPACITY_MODE_FIELD),
                     "period": _period_month(raw.get(timestamp_field)),
-                    "demand": number(demand_field),
-                    "usage": number(usage_field),
-                    "supply": number(CAPACITY_SUPPLY_KEY_FIGURE),
+                    "demand": number(raw.get(demand_field)),
+                    "usage": number(raw.get(usage_field)),
+                    "supply": supply_value,
                     "utilization_pct": utilization_pct,
-                    "consumption_rate": number(rate_field),
+                    "consumption_rate": number(raw.get(rate_field)),
                     "is_supply_row": is_transport_supply_row,
                 })
 
@@ -1890,13 +1933,10 @@ def analyze_capacity_bottlenecks(
             row["period"],
         )
         product_value = None
-        source_value = None
         ship_value = None
         mode_value = None
         if row["resource_type"] in {"handling", "storage"}:
             product_value = row["product"]
-        elif row["resource_type"] == "production":
-            source_value = row["source"]
         elif row["resource_type"] == "transportation":
             ship_value = row["ship_from_location"]
             mode_value = row["mode_of_transport"]
@@ -1908,7 +1948,7 @@ def analyze_capacity_bottlenecks(
                 "location": group_location,
                 "product": product_value,
                 "period": row["period"],
-                "source": source_value,
+                "source_ids": set(),
                 "supply_location": row["supply_location"],
                 "ship_from_location": ship_value,
                 "mode_of_transport": mode_value,
@@ -1922,6 +1962,8 @@ def analyze_capacity_bottlenecks(
                 "missing_supply": row["supply"] is None,
             },
         )
+        if row["source"]:
+            group["source_ids"].add(row["source"])
         if row["demand"] is None and not row["is_supply_row"]:
             group["missing_demand"] = True
         elif row["demand"] is not None:
@@ -1959,14 +2001,17 @@ def analyze_capacity_bottlenecks(
             reverse=True,
         )
         total_demand = sum(item["demand"] or 0 for item in contributors)
+        source_ids = sorted(group["source_ids"])
         results.append({
             key: group[key]
             for key in (
-                "resource_type", "resource", "location", "period", "source",
+                "resource_type", "resource", "location", "period",
                 "supply_location", "ship_from_location", "mode_of_transport",
                 "demand", "usage", "supply",
             )
         } | {
+            "source": ", ".join(source_ids) if source_ids else None,
+            "source_ids": source_ids,
             "shortage": round(shortage, 2) if shortage is not None else None,
             "headroom": round(supply - usage, 2) if required_values_present else None,
             "utilization_pct": round(utilization, 2) if utilization is not None else None,
@@ -1978,6 +2023,7 @@ def analyze_capacity_bottlenecks(
             "contributors": [
                 {
                     "product": item["product"],
+                    "source": item["source"],
                     "location": item["location"],
                     "ship_from_location": item["ship_from_location"],
                     "mode_of_transport": item["mode_of_transport"],
@@ -1993,12 +2039,18 @@ def analyze_capacity_bottlenecks(
         })
     results.sort(key=lambda item: (item["shortage"] or 0, item["utilization_pct"] or 0), reverse=True)
     if resource is not None and len(results) > 1:
+        source_ids = sorted({
+            source_id
+            for item in results
+            for source_id in item.get("source_ids", [])
+        })
         merged = {
             "resource_type": "all",
             "resource": resource,
             "location": results[0].get("location"),
             "period": results[0].get("period"),
-            "source": next((item.get("source") for item in results if item.get("source") is not None), None),
+            "source": ", ".join(source_ids) if source_ids else None,
+            "source_ids": source_ids,
             "supply_location": next((item.get("supply_location") for item in results if item.get("supply_location") is not None), None),
             "ship_from_location": next((item.get("ship_from_location") for item in results if item.get("ship_from_location") is not None), None),
             "mode_of_transport": next((item.get("mode_of_transport") for item in results if item.get("mode_of_transport") is not None), None),

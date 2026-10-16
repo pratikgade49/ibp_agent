@@ -22,11 +22,15 @@ if (-not (Test-Path $VarsFile)) {
 }
 
 $resolvedVarsFile = (Resolve-Path $VarsFile).Path
+$manifestFile = Join-Path $repoRoot 'manifest.yaml'
+$requiredServices = @(
+  @{ Offering = 'connectivity'; Plan = 'lite'; Name = 'ibp-connectivity' },
+  @{ Offering = 'destination'; Plan = 'lite'; Name = 'ibp-destination' }
+)
 $requiredVars = @(
   'llm-provider', 'aws-region', 'bedrock-model', 'aws-bearer-token-bedrock',
   'google-api-key', 'gemini-model', 'anthropic-api-key', 'anthropic-model',
-  'deepseek-api-key', 'deepseek-model', 's4-base-url', 's4-username',
-  's4-password', 's4-api-timeout-seconds'
+  'deepseek-api-key', 'deepseek-model', 's4-api-timeout-seconds'
 )
 $varsContent = Get-Content -Raw $resolvedVarsFile
 $missingVars = @($requiredVars | Where-Object {
@@ -38,7 +42,30 @@ if ($missingVars.Count -gt 0) {
 
 Push-Location $repoRoot
 try {
+  $servicesOutput = & cf services 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "Could not list Cloud Foundry services: $($servicesOutput -join [Environment]::NewLine)"
+  }
+
+  foreach ($service in $requiredServices) {
+    $servicePattern = '^\s*' + [regex]::Escape($service.Name) + '\s{2,}'
+    $serviceExists = @($servicesOutput | Where-Object { $_ -match $servicePattern }).Count -gt 0
+    if ($serviceExists) {
+      Write-Host "Service instance '$($service.Name)' already exists."
+      continue
+    }
+
+    Write-Host "Creating $($service.Offering)/$($service.Plan) service instance '$($service.Name)'..."
+    & cf create-service $service.Offering $service.Plan $service.Name --wait
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to create service instance '$($service.Name)'. Check marketplace availability, quota, and CF target."
+    }
+  }
+
   $pushArgs = @('--vars-file', $resolvedVarsFile, '--redact-env') + $CfPushArgs
+  if (Test-Path $manifestFile) {
+    $pushArgs = @('--manifest', $manifestFile) + $pushArgs
+  }
   & cf push @pushArgs
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE

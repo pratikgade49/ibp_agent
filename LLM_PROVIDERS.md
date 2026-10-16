@@ -31,17 +31,18 @@ After changing provider configuration in Cloud Foundry, restart the app so both 
 
 The repository deployment script reads provider settings from the root `.cf-vars.yml` file and passes it to `cf push`. If the file is missing, `scripts/deploy.ps1` creates it from `.cf-vars.example.yml` and stops so you can fill in the values. The real vars file is excluded from Git and the Cloud Foundry upload; only values are interpolated into the app environment during push.
 
-## S/4 Capacity Reader Connection
+Deploy with the repository wrapper so required service instances are created before the app push:
 
-The S/4 capacity reader also requires these values in `.cf-vars.yml`:
-
-```yaml
-s4-base-url: https://your-s4-host:44301
-s4-username: "your-read-only-s4-user"
-s4-password: "your-s4-password"
-s4-api-timeout-seconds: "30"
+```powershell
+.\scripts\deploy.ps1
 ```
 
-`s4-base-url` is the origin only; the reader appends the `API_WORK_CENTERS` OData service path. The deploy manifest maps these values to `S4_BASE_URL`, `S4_USERNAME`, `S4_PASSWORD`, and `S4_API_TIMEOUT_SECONDS`. If `.cf-vars.yml` already exists, add these entries to it before deploying. Keep the username/password file private; `.cf-vars.yml` is ignored by Git and excluded from the CF upload.
+The script creates the `ibp-connectivity` and `ibp-destination` instances on their `lite` plans when they are missing, waits for provisioning, then runs `cf push` using `manifest.yaml`. The manifest binds both services to the app. A bare `cf push --vars-file .cf-vars.yml --redact-env` cannot create managed service instances; Cloud Foundry CLI has no manifest pre-push provisioning hook.
 
-Quote username/password values in YAML, especially when they contain `#`, `:`, or other YAML-significant characters. `scripts/deploy.ps1` checks that all manifest variable keys are present before pushing and prints missing key names only, never their values.
+## S/4 Capacity Reader Connection
+
+The app uses the `S3DTEST` OnPremise destination with Basic authentication. Configure that destination in the BTP Destination service and configure the matching virtual host, port, and allowed OData resources in Cloud Connector. The deployment wrapper provisions and binds the Connectivity and Destination service instances, but it cannot create the Cloud Connector mapping or the S/4 destination configuration; those remain administrator-managed BTP setup.
+
+Set `s4-api-timeout-seconds` in `.cf-vars.yml` as needed. S/4 URL and Basic credentials are read from `S3DTEST`, not supplied in the vars file. The vars file should contain only the selected LLM provider's credentials and app-level settings; keep it private and never commit secrets.
+
+The script checks that required vars keys exist and prints missing key names only, never their values. Ensure the CLI is logged in and targeted to the intended org and space before deployment. The space must have access to the `connectivity/lite` and `destination/lite` plans, and the configured `S3DTEST` destination must already exist and pass its BTP connection check.

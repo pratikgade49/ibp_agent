@@ -29,6 +29,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { AskResponse, ChatMessage, Conversation, DataRecord, Insight } from './types';
+import SalesAssurance from './SalesAssurance';
 
 const STORAGE_KEY = 'ibp-demand-desk-conversations-v1';
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -425,7 +426,7 @@ function formatDate(value: string): string {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [agentMode, setAgentMode] = useState<'ibp' | 's4'>('ibp');
+  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales'>('ibp');
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [connection, setConnection] = useState<'connected' | 'running' | 'offline'>('connected');
@@ -459,7 +460,7 @@ export default function App() {
     setHistoryOpen(false);
   }
 
-  function selectAgentMode(mode: 'ibp' | 's4') {
+  function selectAgentMode(mode: 'ibp' | 's4' | 'sales') {
     if (mode === agentMode) return;
     setAgentMode(mode);
     if (activeConversation && (activeConversation.agentMode || 'ibp') !== mode) {
@@ -489,7 +490,8 @@ export default function App() {
     saveConversation(optimistic);
 
     try {
-      const response = await fetch(selectedMode === 's4' ? '/s4/ask' : '/ask', {
+      const endpoint = selectedMode === 's4' ? '/s4/ask' : selectedMode === 'sales' ? '/sales/ask' : '/ask';
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, conversation_id: existing?.conversationId || null }),
@@ -538,6 +540,21 @@ export default function App() {
       void submitQuestion(question);
     }
   }
+
+  if (agentMode === 'sales') {
+    return (
+      <SalesAssurance
+        data={activeConversation?.agentMode === 'sales' ? dashboardData : null}
+        messages={messages}
+        loading={loading}
+        error={error}
+        onAsk={(value) => void submitQuestion(value)}
+        onNewConversation={startNewConversation}
+        onSelectMode={selectAgentMode}
+      />
+    );
+  }
+  const salesModeSelected = (agentMode as string) === 'sales';
 
   return (
     <div className={`app-frame ${historyOpen ? 'history-open' : ''}`}>
@@ -628,6 +645,7 @@ export default function App() {
           <div className="agent-mode" role="radiogroup" aria-label="Select agent">
             <button type="button" role="radio" aria-checked={agentMode === 'ibp'} className={agentMode === 'ibp' ? 'selected' : ''} onClick={() => selectAgentMode('ibp')} disabled={loading}>IBP</button>
             <button type="button" role="radio" aria-checked={agentMode === 's4'} className={agentMode === 's4' ? 'selected' : ''} onClick={() => selectAgentMode('s4')} disabled={loading}>S/4 Capacity</button>
+            <button type="button" role="radio" aria-checked={salesModeSelected} className={salesModeSelected ? 'selected' : ''} onClick={() => selectAgentMode('sales')} disabled={loading}>Sales</button>
           </div>
           <div className="chat-context"><span className="context-line" />{activeConversation ? activeConversation.title : 'New conversation'}</div>
           <div className="message-list" ref={messageListRef} aria-live="polite">
