@@ -4,6 +4,7 @@ import {
   ArrowDownRight,
   ArrowRight,
   ArrowUpRight,
+  Blocks,
   Check,
   ChevronDown,
   CircleHelp,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react';
 import type { ChatMessage, DataRecord } from './types';
 import './sales-assurance.css';
+import yashLogo from './assets/Yash logo.jpg';
 
 type SalesMode = 'ibp' | 's4' | 'sales';
 
@@ -31,6 +33,7 @@ interface SalesAssuranceProps {
   onAsk: (value: string) => void;
   onNewConversation: () => void;
   onSelectMode: (mode: SalesMode) => void;
+  onShowAgents: () => void;
 }
 
 const PREVIEW: DataRecord = {
@@ -85,7 +88,7 @@ function text(value: unknown, fallback = 'Not available'): string {
   return value == null || value === '' ? fallback : String(value);
 }
 
-function SalesAssurance({ data, messages, loading, error, onAsk, onNewConversation, onSelectMode }: SalesAssuranceProps) {
+function SalesAssurance({ data, messages, loading, error, onAsk, onNewConversation, onSelectMode, onShowAgents }: SalesAssuranceProps) {
   const [draft, setDraft] = useState('');
   const [selectedOrder, setSelectedOrder] = useState(0);
   const scenario = data?.evidence_type === 'sales_assurance' ? data : PREVIEW;
@@ -112,7 +115,7 @@ function SalesAssurance({ data, messages, loading, error, onAsk, onNewConversati
     <div className="assurance-app">
       <header className="assurance-topbar">
         <a className="assurance-brand" href="#top" aria-label="Commercial Assurance Agent home">
-          <span className="assurance-brand-mark"><ShieldAlert size={19} /></span>
+          <span className="assurance-brand-mark"><img src={yashLogo} alt="YASH Technologies" /></span>
           <span><strong>Commercial Assurance Agent</strong><small>SAP Sales · Supply Risk · Decision Support</small></span>
         </a>
         <nav className="assurance-nav" aria-label="Agent workspace">
@@ -121,6 +124,7 @@ function SalesAssurance({ data, messages, loading, error, onAsk, onNewConversati
           <button type="button" className="assurance-mode" onClick={() => onSelectMode('s4')}>S/4 Capacity</button>
         </nav>
         <div className="assurance-top-actions">
+          <button type="button" className="all-agents-button" onClick={onShowAgents}><Blocks size={14} /> All agents</button>
           <span className="ready-state"><i /> Ready</span>
           <button type="button" className="assurance-icon-button" onClick={onNewConversation} aria-label="Start a new conversation" title="New conversation"><RefreshCw size={16} /></button>
         </div>

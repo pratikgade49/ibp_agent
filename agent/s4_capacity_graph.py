@@ -1,5 +1,7 @@
 """Read-only SAP S/4HANA capacity agent graph."""
 import json
+import re
+from datetime import date, timedelta
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -9,6 +11,7 @@ from agent.llm import get_llm_client
 from agent.s4_capacity_tools import (
     analyze_s4_capacity_load,
     recommend_s4_group_alternates,
+    recommend_s4_routing_alternates,
     read_s4_work_center_capacities,
 )
 
@@ -20,11 +23,14 @@ or shift intervals. If neither a plant nor work center is specified for that
 configuration read, inspect all work centers rather than asking for IDs.
 Report the returned capacity and shift data without inventing weekday mappings.
 If work_center_list_truncated is true, disclose that the plant result is partial.
-When the user asks to compare load or identify bottlenecks, date inputs are
-optional. If both dates are omitted, evaluate today through 29 days from today
-(30 calendar days total). If only a start date is given, use a 30-calendar-day
-window starting there; if only an end date is given, start today. Do not ask
-for dates when they are omitted. Call analyze_s4_capacity_load with
+When the user asks to compare load or identify bottlenecks, use the current
+server date supplied above as today. For "next N days", "coming N days", or
+"coming next N days", evaluate today through today + N - 1 days (N calendar
+days total). If the user gives no duration or dates, evaluate today through
+29 days from today (30 calendar days total). If only a start date is given,
+use a 30-calendar-day window starting there; if only an end date is given,
+start today. Do not ask for dates when they are omitted. Call
+analyze_s4_capacity_load with
 bucket_type='D' for daily evaluation. Plant and work-center filters are
 optional: when the user asks across all locations/work centers, omit both
 filters so SAP evaluates all accessible combinations. Do not ask the user to
@@ -44,17 +50,27 @@ with nonnegative remaining capacity. Do not claim unreturned dates were within
 capacity; state that no bucket was returned for them and their status is
 unverified. A single returned bucket does not establish coverage of the full
 requested date range.
-For every overloaded bucket, report its recommended_actions in the same
-response. They are advisory next steps only: do not imply that any order was
+For every overloaded bucket provided in the compact tool summary, report its
+recommended_actions in the same response. If the summary says details or
+contributors were omitted, disclose that and point to the attached evidence.
+They are advisory next steps only: do not imply that any order was
 rescheduled or any capacity changed, and never write to SAP. Recommend moving
 orders only to dates with SAP-returned nonnegative remaining capacity. Be
 explicit about incomplete or empty results.
-When an overloaded work center needs an alternate, call
-recommend_s4_group_alternates for the same plant, work center, and overload
-date. It reads SAP work-center group membership, checks each other member's
-evaluated capacity, and returns only configured group members. Do not infer
-alternates from work-center category or similarity. If no group membership is
-returned, state that SAP has no group-defined alternate for the work center.
+When an overloaded bucket has order, operation, and material contributors,
+call recommend_s4_routing_alternates with those values, the source plant/work
+center, and overload date. ZALT_WC_FINDER_SRV is the authoritative finder for
+the Class 019 operation classification: it compares the operation's assigned
+class/characteristic values to alternate work-center assignments. Order,
+operation, material, plant, and source work center identify the exact operation
+context; they are not themselves the alternate-selection rule. Only rows with
+MatchStatus MATCH are candidates. The tool separately evaluates each
+candidate's SAP capacity and returns those results; do not describe Class 019
+matches alone as available capacity. If contributor identity is missing, do
+not guess; use recommend_s4_group_alternates only when group-based alternates
+are appropriate. It checks configured work-center group members' evaluated
+capacity. Never infer alternates from work-center category or similarity.
+If neither source returns candidates, state which lookup returned no result.
 This is advisory and read-only; never dispatch or reschedule an operation.
 """
 
@@ -62,7 +78,9 @@ TOOL_REGISTRY = {
     "read_s4_work_center_capacities": read_s4_work_center_capacities,
     "analyze_s4_capacity_load": analyze_s4_capacity_load,
     "recommend_s4_group_alternates": recommend_s4_group_alternates,
+    "recommend_s4_routing_alternates": recommend_s4_routing_alternates,
 }
+MAX_S4_HISTORY_MESSAGES = 12
 
 TOOL_SCHEMAS = [
     {
@@ -121,6 +139,28 @@ TOOL_SCHEMAS = [
                 "evaluation_date": {"type": "string", "description": "Overload date, YYYY-MM-DD"},
             },
             "required": ["plant", "work_center", "evaluation_date"],
+        },
+    },
+    {
+        "name": "recommend_s4_routing_alternates",
+        "description": (
+            "Find alternate work centers from the Class 019 operation "
+            "classification using ZALT_WC_FINDER_SRV, then "
+            "check each matched work center's SAP-evaluated capacity on the date. "
+            "Requires source plant/work center plus the exact order, operation, "
+            "material and evaluation date. Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plant": {"type": "string", "description": "Source S/4 plant ID"},
+                "work_center": {"type": "string", "description": "Source work center (SrcArbpl)"},
+                "order_id": {"type": "string", "description": "Manufacturing order ID (Aufnr)"},
+                "operation": {"type": "string", "description": "Operation number (Vornr)"},
+                "material": {"type": "string", "description": "Material number (Matnr)"},
+                "evaluation_date": {"type": "string", "description": "Overload date, YYYY-MM-DD"},
+            },
+            "required": ["plant", "work_center", "order_id", "operation", "material", "evaluation_date"],
         },
     },
 ]
@@ -193,11 +233,92 @@ def _agent_node(state: S4AgentState) -> dict:
     return {
         "messages": [
             client.chat(
-                system=SYSTEM_PROMPT,
+                system=f"Current server date: {date.today().isoformat()}.\n\n{SYSTEM_PROMPT}",
                 messages=state["messages"],
                 tools=TOOL_SCHEMAS,
             )
         ]
+    }
+
+
+def _relative_capacity_date_range(
+    user_message: str, today: date | None = None
+) -> tuple[str, str] | None:
+    if re.search(
+        r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+        user_message,
+    ):
+        return None
+    match = re.search(
+        r"\b(?:(?:in|for)\s+)?(?:(?:the|coming|upcoming)\s+)?next\s+(\d{1,2})\s+days?\b",
+        user_message,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    day_count = int(match.group(1))
+    if day_count < 1:
+        return None
+    start = today or date.today()
+    end = start + timedelta(days=day_count - 1)
+    return start.isoformat(), end.isoformat()
+
+
+def _latest_user_text(messages: list) -> str:
+    for message in reversed(messages):
+        if isinstance(message, dict):
+            role = message.get("role")
+            content = message.get("content")
+        else:
+            role = getattr(message, "type", "")
+            content = getattr(message, "content", None)
+        if role in {"user", "human"} and isinstance(content, str):
+            return content
+    return ""
+
+
+def _capacity_model_summary(result: dict) -> dict:
+    evaluations = result.get("capacity_evaluations")
+    if not isinstance(evaluations, list):
+        return result
+
+    overloaded = [
+        row for row in evaluations
+        if isinstance(row, dict) and row.get("status") == "overloaded"
+    ]
+    overload_keys = {
+        (str(row.get("date")), str(row.get("plant")), str(row.get("work_center")))
+        for row in overloaded
+    }
+    contributors = [
+        row for row in result.get("contributors", [])
+        if isinstance(row, dict)
+        and (str(row.get("date")), str(row.get("plant")), str(row.get("work_center")))
+        in overload_keys
+    ]
+    max_overload_rows = 20
+    max_contributor_rows = 40
+    return {
+        "status": result.get("status"),
+        "read_only": result.get("read_only"),
+        "source": result.get("source"),
+        "evaluation": result.get("evaluation"),
+        "evaluation_count": result.get("evaluation_count", len(evaluations)),
+        "evaluated_bucket_dates": result.get("evaluated_bucket_dates", []),
+        "overloaded_bucket_count": len(overloaded),
+        "overloaded_buckets": overloaded[:max_overload_rows],
+        "overloaded_buckets_omitted": max(0, len(overloaded) - max_overload_rows),
+        "within_capacity_bucket_count": sum(
+            isinstance(row, dict) and row.get("status") == "within_capacity"
+            for row in evaluations
+        ),
+        "incomplete_bucket_count": sum(
+            isinstance(row, dict) and row.get("status") == "capacity_data_incomplete"
+            for row in evaluations
+        ),
+        "contributor_count": result.get("contributor_count", len(result.get("contributors", []))),
+        "overloaded_contributors": contributors[:max_contributor_rows],
+        "overloaded_contributors_omitted": max(0, len(contributors) - max_contributor_rows),
     }
 
 
@@ -209,16 +330,28 @@ def _tool_node(state: S4AgentState) -> dict:
         if block.get("type") != "tool_use":
             continue
         name = block["name"]
+        tool_input = dict(block.get("input") or {})
+        if name == "analyze_s4_capacity_load":
+            relative_range = _relative_capacity_date_range(
+                _latest_user_text(state["messages"])
+            )
+            if relative_range:
+                tool_input["start_date"], tool_input["end_date"] = relative_range
         try:
-            result = TOOL_REGISTRY[name](**block["input"])
+            result = TOOL_REGISTRY[name](**tool_input)
         except Exception as exc:
             result = {"error": str(exc)}
+        model_result = (
+            _capacity_model_summary(result)
+            if name == "analyze_s4_capacity_load" and "error" not in result
+            else result
+        )
         tool_results.append(
             {
                 "type": "tool_result",
                 "tool_use_id": block["id"],
                 "name": name,
-                "content": json.dumps(result),
+                "content": json.dumps(model_result),
             }
         )
         insights.append({"tool": name, "data": result})
@@ -311,7 +444,7 @@ def run_s4_agent_with_data(user_message: str, history: list[dict] | None = None)
     )
     graph.add_edge("tool_node", "agent_node")
 
-    messages = list(history or [])
+    messages = list(history or [])[-MAX_S4_HISTORY_MESSAGES:]
     messages.append({"role": "user", "content": user_message})
     final_state = graph.compile().invoke({"messages": messages, "insights": []})
     last_message = final_state["messages"][-1]

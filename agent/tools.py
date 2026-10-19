@@ -16,6 +16,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urljoin
 import requests
 USE_MOCK_DATA = os.environ.get("USE_MOCK_DATA", "true").lower() == "true"
 # ---------------------------------------------------------------------------
@@ -134,7 +135,28 @@ def _ibp_get(select: str, filter_: str) -> dict:
             f"SAP IBP request failed with HTTP {resp.status_code}; "
             f"select={select}; filter={filter_}; response={resp.text}"
         )
-    return resp.json()
+    payload = resp.json()
+    data = payload.get("d", {})
+    results = data.get("results", [])
+    next_url = data.get("__next")
+    while next_url:
+        next_response = requests.get(
+            urljoin(url, next_url),
+            auth=(IBP_USER, IBP_PASSWORD),
+            timeout=30,
+        )
+        if not next_response.ok:
+            raise RuntimeError(
+                f"SAP IBP request failed with HTTP {next_response.status_code}; "
+                f"continuation_url={next_url}; response={next_response.text}"
+            )
+        next_data = next_response.json().get("d", {})
+        results.extend(next_data.get("results", []))
+        next_url = next_data.get("__next")
+    if "d" in payload:
+        data["results"] = results
+        data.pop("__next", None)
+    return payload
 
 
 def _period_timestamp(period: str) -> str:
@@ -2331,7 +2353,8 @@ def detect_forecast_anomalies(
         customer: str | None = None,
         sigma_threshold: float = 3.0,
         flatline_min_periods: int = 4,
-        result_scope: str = "combination",
+    result_scope: str | None = None,
+    all_products: bool = False,
     ) -> dict:
     """
         Scan statistical forecast time series for spikes/drops and flatlines.
@@ -2340,6 +2363,10 @@ def detect_forecast_anomalies(
     The statistical detection itself runs in deterministic Python, not in the
     LLM prompt -- the agent only reasons over the structured result below.
     """
+    if all_products:
+        product = None
+    if result_scope is None:
+        result_scope = "product" if all_products else "combination"
     if result_scope not in {"product", "combination"}:
         raise ValueError("result_scope must be 'product' or 'combination'")
     if USE_MOCK_DATA:

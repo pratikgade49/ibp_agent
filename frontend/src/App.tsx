@@ -1,23 +1,25 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import yashLogo from './assets/Yash logo.jpg';
 import jouleLogo from './assets/sap-joule-logo.svg';
-import planningAgentMark from './assets/planning-agent-mark.svg';
 import {
   Activity,
   ArrowDown,
+  ArrowRight,
   ArrowUpRight,
   Check,
   ChevronDown,
   Clock3,
   Database,
-  Menu,
+  Factory,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
   Send,
+  ShieldCheck,
   Sparkles,
-  X,
+  type LucideIcon,
 } from 'lucide-react';
 import {
   Bar,
@@ -38,6 +40,48 @@ const PROMPTS = [
   'Show forecast anomalies',
   'Is sales history ready?',
   'Which resources are bottlenecks in the next three periods?',
+];
+
+const AGENTS: Array<{
+  id: 'ibp' | 's4' | 'sales';
+  index: string;
+  name: string;
+  descriptor: string;
+  description: string;
+  capabilities: string[];
+  icon: LucideIcon;
+  tone: string;
+}> = [
+  {
+    id: 'ibp',
+    index: '01',
+    name: 'IBP Demand Planning',
+    descriptor: 'Forecast intelligence',
+    description: 'Explore demand signals, forecast quality, data readiness, and planning exceptions across your business.',
+    capabilities: ['Forecast analysis', 'Anomaly detection', 'Master data health'],
+    icon: Activity,
+    tone: 'blue',
+  },
+  {
+    id: 's4',
+    index: '02',
+    name: 'S/4 Capacity Reader',
+    descriptor: 'Capacity & constraints',
+    description: 'Read work-center setup, evaluate daily capacity, and identify overloaded resources using SAP data.',
+    capabilities: ['Daily load evaluation', 'Work-center shifts', 'Bottleneck evidence'],
+    icon: Factory,
+    tone: 'teal',
+  },
+  {
+    id: 'sales',
+    index: '03',
+    name: 'Commercial Assurance',
+    descriptor: 'Order risk decisions',
+    description: 'Understand delivery exposure, compare supply options, and prepare commercial decisions for review.',
+    capabilities: ['Order exposure', 'Supply alternatives', 'Decision support'],
+    icon: ShieldCheck,
+    tone: 'coral',
+  },
 ];
 
 function asRecord(value: unknown): DataRecord | null {
@@ -427,10 +471,12 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales'>('ibp');
+  const [showAgentDirectory, setShowAgentDirectory] = useState(true);
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [connection, setConnection] = useState<'connected' | 'running' | 'offline'>('connected');
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [error, setError] = useState('');
   const messageListRef = useRef<HTMLDivElement>(null);
   const activeConversation = conversations.find((conversation) => conversation.id === activeId);
@@ -446,7 +492,10 @@ export default function App() {
   }, [conversations]);
 
   useEffect(() => {
-    if (messageListRef.current) messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+    if (!messageListRef.current) return;
+    messageListRef.current.scrollTop = messages.length === 0
+      ? 0
+      : messageListRef.current.scrollHeight;
   }, [messages.length, loading]);
 
   function saveConversation(conversation: Conversation) {
@@ -460,6 +509,14 @@ export default function App() {
     setHistoryOpen(false);
   }
 
+  function toggleHistory() {
+    if (window.matchMedia('(max-width: 980px)').matches) {
+      setHistoryOpen((open) => !open);
+      return;
+    }
+    setHistoryCollapsed((collapsed) => !collapsed);
+  }
+
   function selectAgentMode(mode: 'ibp' | 's4' | 'sales') {
     if (mode === agentMode) return;
     setAgentMode(mode);
@@ -467,6 +524,12 @@ export default function App() {
       setActiveId(null);
     }
     setError('');
+  }
+
+  function openAgent(mode: 'ibp' | 's4' | 'sales') {
+    selectAgentMode(mode);
+    setShowAgentDirectory(false);
+    setHistoryOpen(false);
   }
 
   async function submitQuestion(value: string) {
@@ -541,6 +604,62 @@ export default function App() {
     }
   }
 
+  if (showAgentDirectory) {
+    return (
+      <div className="app-frame agent-directory-frame">
+        <header className="topbar directory-topbar">
+          <div className="brand-lockup">
+            <div className="brand-mark"><img src={yashLogo} alt="YASH Technologies" /></div>
+            <div className="brand-copy"><strong>Yash-SAP AI Agent Dashboard</strong><span>Planners Workspace</span></div>
+          </div>
+          <div className="directory-topbar-label"><span className="directory-live-dot" /> Planning intelligence network</div>
+        </header>
+        <main className="agent-directory">
+          <section className="directory-intro">
+            <div>
+              <span className="directory-kicker"><span /> AGENT WORKSPACES <i /> SAP CONNECTED</span>
+              <h1>Choose your<br /><span>planning perspective.</span></h1>
+              <p>Three specialist agents. One connected planning workspace.</p>
+            </div>
+            <div className="directory-network" aria-hidden="true">
+              <div className="network-core"><Sparkles size={22} /></div>
+              <span className="network-node node-one"><Activity size={15} /></span>
+              <span className="network-node node-two"><Factory size={15} /></span>
+              <span className="network-node node-three"><ShieldCheck size={15} /></span>
+              <span className="network-line line-one" />
+              <span className="network-line line-two" />
+              <span className="network-line line-three" />
+            </div>
+          </section>
+
+          <section className="agent-directory-grid" aria-label="Available agent workspaces">
+            {AGENTS.map((agent) => {
+              const Icon = agent.icon;
+              return (
+                <article className={`directory-agent-card ${agent.tone}`} key={agent.id}>
+                  <div className="directory-card-topline"><span>WORKSPACE {agent.index}</span><span className="directory-card-state"><i /> READY</span></div>
+                  <div className="directory-agent-icon"><Icon size={21} strokeWidth={1.8} /></div>
+                  <span className="directory-agent-descriptor">{agent.descriptor}</span>
+                  <h2>{agent.name}</h2>
+                  <p>{agent.description}</p>
+                  <ul>{agent.capabilities.map((capability) => <li key={capability}>{capability}</li>)}</ul>
+                  <button type="button" className="directory-open-button" onClick={() => openAgent(agent.id)}>
+                    Open workspace <ArrowRight size={16} />
+                  </button>
+                </article>
+              );
+            })}
+          </section>
+
+          <footer className="directory-footer">
+            <span><i /> SHARED PLANNING FOUNDATION</span>
+            <p>SAP data access <b /> Conversation history <b /> Read-only analysis where applicable</p>
+          </footer>
+        </main>
+      </div>
+    );
+  }
+
   if (agentMode === 'sales') {
     return (
       <SalesAssurance
@@ -551,23 +670,29 @@ export default function App() {
         onAsk={(value) => void submitQuestion(value)}
         onNewConversation={startNewConversation}
         onSelectMode={selectAgentMode}
+        onShowAgents={() => setShowAgentDirectory(true)}
       />
     );
   }
   const salesModeSelected = (agentMode as string) === 'sales';
-
   return (
-    <div className={`app-frame ${historyOpen ? 'history-open' : ''}`}>
+    <div className={`app-frame ${historyOpen ? 'history-open' : ''} ${historyCollapsed ? 'history-collapsed' : ''}`}>
       <header className="topbar">
-        <button className="icon-button mobile-history-toggle" aria-label="Toggle conversation history" onClick={() => setHistoryOpen(!historyOpen)}>
-          {historyOpen ? <X size={18} /> : <Menu size={18} />}
-        </button>
         <div className="brand-lockup">
-          <div className="brand-mark"><img src={planningAgentMark} alt="Planning agent" /></div>
-          <div className="brand-copy"><strong>YASH-SAP AGENTIC AI DASHBOARD</strong><span>Planners Workspace</span></div>
+          <div className="brand-mark"><img src={yashLogo} alt="YASH Technologies" /></div>
+          <div className="brand-copy"><strong>Yash-SAP AI Agent Dashboard</strong><span>Planners Workspace</span></div>
+        </div>
+        <div className="topbar-agent-switch" role="radiogroup" aria-label="Choose planning agent">
+          <button type="button" role="radio" aria-checked={agentMode === 'ibp'} className={agentMode === 'ibp' ? 'selected' : ''} onClick={() => selectAgentMode('ibp')} disabled={loading}>IBP</button>
+          <button type="button" role="radio" aria-checked={agentMode === 's4'} className={agentMode === 's4' ? 'selected' : ''} onClick={() => selectAgentMode('s4')} disabled={loading}>S/4 Capacity</button>
+          <button type="button" role="radio" aria-checked={salesModeSelected} className={salesModeSelected ? 'selected' : ''} onClick={() => selectAgentMode('sales')} disabled={loading}>Sales</button>
         </div>
         <div className="topbar-right">
+          <button type="button" className="directory-return-button" onClick={() => setShowAgentDirectory(true)}><PanelLeftOpen size={15} /> All agents</button>
           <span className={`connection-state ${connection}`}><i />{connection === 'running' ? 'Analyzing' : connection === 'offline' ? 'Agent unavailable' : 'Agent connected'}</span>
+          <button className="icon-button history-toggle" aria-label="Toggle conversation history" title="Toggle conversation history" onClick={toggleHistory}>
+            {historyCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+          </button>
           <button className="icon-button new-chat-top" aria-label="Start a new conversation" title="New conversation" onClick={startNewConversation}><MessageSquarePlus size={17} /></button>
         </div>
       </header>
@@ -584,7 +709,7 @@ export default function App() {
               <button
                 className={`history-entry ${conversation.id === activeId ? 'selected' : ''}`}
                 key={conversation.id}
-                onClick={() => { setActiveId(conversation.id); setAgentMode(conversation.agentMode || 'ibp'); setError(''); setHistoryOpen(false); }}
+                onClick={() => { setActiveId(conversation.id); setAgentMode(conversation.agentMode || 'ibp'); setShowAgentDirectory(false); setError(''); setHistoryOpen(false); }}
                 disabled={loading}
               >
                 <span className="history-entry-title">{conversation.title}</span>
@@ -640,12 +765,6 @@ export default function App() {
           <div className="agent-header">
             <div className="agent-avatar"><img src={jouleLogo} alt="SAP Joule" /></div>
             <div className="agent-heading"><strong>{agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'}</strong><span><i /> Ready to analyze</span></div>
-            <button className="icon-button panel-toggle" aria-label="Toggle conversation history" title="Conversation list" onClick={() => setHistoryOpen(!historyOpen)}><PanelLeftOpen size={17} /></button>
-          </div>
-          <div className="agent-mode" role="radiogroup" aria-label="Select agent">
-            <button type="button" role="radio" aria-checked={agentMode === 'ibp'} className={agentMode === 'ibp' ? 'selected' : ''} onClick={() => selectAgentMode('ibp')} disabled={loading}>IBP</button>
-            <button type="button" role="radio" aria-checked={agentMode === 's4'} className={agentMode === 's4' ? 'selected' : ''} onClick={() => selectAgentMode('s4')} disabled={loading}>S/4 Capacity</button>
-            <button type="button" role="radio" aria-checked={salesModeSelected} className={salesModeSelected ? 'selected' : ''} onClick={() => selectAgentMode('sales')} disabled={loading}>Sales</button>
           </div>
           <div className="chat-context"><span className="context-line" />{activeConversation ? activeConversation.title : 'New conversation'}</div>
           <div className="message-list" ref={messageListRef} aria-live="polite">
@@ -655,7 +774,7 @@ export default function App() {
                 <h2>{agentMode === 's4' ? 'Read your S/4 capacity setup.' : 'Good planning starts with a clear signal.'}</h2>
                 <p>{agentMode === 's4' ? 'Inspect configured work-center capacity and shift intervals.' : 'Ask about forecasts, anomalies, data readiness, or capacity constraints.'}</p>
                 <div className="prompt-list">
-                  {(agentMode === 's4' ? ['Read capacity for RESOR_01 in plant PL01', 'Show capacity shifts for plant PL01'] : PROMPTS).map((prompt) => <button key={prompt} onClick={() => void submitQuestion(prompt)} disabled={loading}>{prompt}<ArrowUpRight size={14} /></button>)}
+                  {(agentMode === 's4' ? ['Is there a possibility of a capacity bottleneck for any resource from DD/MM/YYYY to DD/MM/YYYY?'] : PROMPTS).map((prompt) => <button key={prompt} onClick={() => void submitQuestion(prompt)} disabled={loading}>{prompt}<ArrowUpRight size={14} /></button>)}
                 </div>
               </div>
             ) : messages.map((message) => (

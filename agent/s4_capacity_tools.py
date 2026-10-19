@@ -16,10 +16,22 @@ S4_DESTINATION_NAME = os.environ.get("S4_DESTINATION_NAME", "").strip()
 S4_API_TIMEOUT_SECONDS = float(os.environ.get("S4_API_TIMEOUT_SECONDS", "30"))
 S4_WORK_CENTERS_ROOT = "/sap/opu/odata/sap/API_WORK_CENTERS"
 S4_WORK_CENTERS_UI_ROOT = "/sap/opu/odata/sap/UI_WORKCENTERS"
+S4_ALTERNATE_WORK_CENTERS_ROOT = os.environ.get(
+    "S4_ALTERNATE_WORK_CENTERS_ROOT",
+    "/sap/opu/odata/sap/ZALT_WC_FINDER_SRV",
+).rstrip("/")
 
 
 def _odata_literal(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _same_sap_order_id(left: object, right: str) -> bool:
+    left_value = str(left or "").strip()
+    right_value = str(right or "").strip()
+    if left_value.isdigit() and right_value.isdigit():
+        return left_value.lstrip("0") == right_value.lstrip("0")
+    return left_value == right_value
 
 
 def _collection_rows(payload: dict) -> list[dict]:
@@ -710,5 +722,120 @@ def recommend_s4_group_alternates(
             None
             if alternates
             else "No alternate work centers are assigned through a work-center group in SAP."
+        ),
+    }
+
+
+def recommend_s4_routing_alternates(
+    plant: str,
+    work_center: str,
+    order_id: str,
+    operation: str,
+    material: str,
+    evaluation_date: str,
+) -> dict:
+    """Read Class 019 operation alternates and check their SAP capacity."""
+    if not all((plant, work_center, order_id, operation, material)):
+        raise ValueError(
+            "plant, work_center, order_id, operation, and material are required"
+        )
+    try:
+        datetime.strptime(evaluation_date, "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("evaluation_date must use YYYY-MM-DD format") from exc
+
+    query = {
+        "$filter": " and ".join(
+            (
+                f"SrcWerks eq '{_odata_literal(plant)}'",
+                f"SrcArbpl eq '{_odata_literal(work_center)}'",
+            )
+        ),
+        "$format": "json",
+    }
+    rows = _collection_rows(
+        _s4_get(
+            "AlternateWCSet",
+            query,
+            service_root=S4_ALTERNATE_WORK_CENTERS_ROOT,
+        )
+    )
+
+    alternates = []
+    seen_centers = set()
+    match_rows = [
+        row
+        for row in rows
+        if _same_sap_order_id(row.get("Aufnr"), order_id)
+        and str(row.get("Vornr", "")).strip() == operation
+        and str(row.get("Matnr", "")).strip() == material
+        and str(row.get("MatchStatus", "")).strip().upper() == "MATCH"
+    ]
+    for row in match_rows:
+        alternate_plant = row.get("AltWerks")
+        alternate_work_center = row.get("AltArbpl")
+        identity = (alternate_plant, alternate_work_center)
+        if not alternate_plant or not alternate_work_center or identity in seen_centers:
+            continue
+        seen_centers.add(identity)
+
+        capacity_result = analyze_s4_capacity_load(
+            plant=alternate_plant,
+            work_center=alternate_work_center,
+            start_date=evaluation_date,
+            end_date=evaluation_date,
+            bucket_type="D",
+        )
+        capacity_rows = capacity_result["capacity_evaluations"]
+        if not capacity_rows:
+            capacity_status = "capacity_not_evaluated"
+        elif any(item["status"] == "overloaded" for item in capacity_rows):
+            capacity_status = "overloaded"
+        elif all(
+            item.get("remaining_capacity") is not None
+            and item["remaining_capacity"] >= 0
+            for item in capacity_rows
+        ):
+            capacity_status = "within_capacity"
+        else:
+            capacity_status = "capacity_data_incomplete"
+
+        alternates.append(
+            {
+                "work_center": alternate_work_center,
+                "plant": alternate_plant,
+                "capacity_status": capacity_status,
+                "capacity_evaluations": capacity_rows,
+                "match_status": row.get("MatchStatus"),
+                "source_class": row.get("SrcClass"),
+                "source_characteristic": row.get("SrcAtnam"),
+                "source_characteristic_value": row.get("SrcAtwrt"),
+                "alternate_characteristic_value": row.get("AltAtwrt"),
+                "message": row.get("Message"),
+                "order_id": row.get("Aufnr"),
+                "operation": row.get("Vornr"),
+                "material": row.get("Matnr"),
+                "routing_type": row.get("Plnty"),
+                "routing_group": row.get("Plnnr"),
+                "routing_counter": row.get("Plnal"),
+            }
+        )
+
+    return {
+        "status": "completed",
+        "read_only": True,
+        "plant": plant,
+        "work_center": work_center,
+        "order_id": order_id,
+        "operation": operation,
+        "material": material,
+        "evaluation_date": evaluation_date,
+        "alternate_source": "ZALT_WC_FINDER_SRV Class 019 operation classification",
+        "alternate_count": len(alternates),
+        "alternates": alternates,
+        "message": (
+            None
+            if alternates
+            else "The alternate-work-center finder returned no MATCH rows for this routing operation."
         ),
     }

@@ -192,6 +192,96 @@ class S4CapacityReaderTests(unittest.TestCase):
         self.assertEqual(result["alternates"], [])
         self.assertIn("No alternate work centers", result["message"])
 
+    def test_routing_alternate_lookup_uses_custom_matches_and_checks_capacity(self):
+        finder_rows = [
+            {
+                "SrcWerks": "PL01",
+                "SrcArbpl": "WCEN002",
+                "Aufpl": "0000001642",
+                "Aplzl": "00000001",
+                "Aufnr": "1001785",
+                "Vornr": "0010",
+                "Matnr": "3000190",
+                "Plnty": "N",
+                "Plnnr": "50000189",
+                "Plnal": "1",
+                "SrcClass": "ALTERNATE_RESOURCE",
+                "SrcAtnam": "ALTERNATE_RESOURCES",
+                "SrcAtwrt": "WCEN002",
+                "AltWerks": "PL01",
+                "AltArbpl": "WCEN003",
+                "AltAtwrt": "WCEN003",
+                "MatchStatus": "MATCH",
+                "Message": "Class and routing values match - capacity not checked",
+            },
+            {
+                "SrcWerks": "PL01",
+                "SrcArbpl": "WCEN002",
+                "Aufnr": "OTHER-ORDER",
+                "Vornr": "0010",
+                "Matnr": "3000190",
+                "AltWerks": "PL01",
+                "AltArbpl": "WCEN099",
+                "MatchStatus": "MATCH",
+            },
+            {
+                "SrcWerks": "PL01",
+                "SrcArbpl": "WCEN002",
+                "Aufpl": "0000001642",
+                "Aplzl": "00000001",
+                "AltWerks": "PL01",
+                "AltArbpl": "WCEN004",
+                "MatchStatus": "NO_MATCH",
+            },
+        ]
+        with patch.object(
+            tools,
+            "_s4_get",
+            return_value={"d": {"results": finder_rows}},
+        ) as get, patch.object(
+            tools,
+            "analyze_s4_capacity_load",
+            return_value={
+                "capacity_evaluations": [
+                    {
+                        "date": "20261023",
+                        "remaining_capacity": 4.0,
+                        "status": "within_capacity",
+                    }
+                ]
+            },
+        ) as analyze:
+            result = tools.recommend_s4_routing_alternates(
+                "PL01", "WCEN002", "000001001785", "0010", "3000190", "2026-10-23"
+            )
+
+        self.assertEqual(
+            get.call_args.kwargs["service_root"],
+            tools.S4_ALTERNATE_WORK_CENTERS_ROOT,
+        )
+        self.assertEqual(
+            get.call_args.args[1]["$filter"],
+            "SrcWerks eq 'PL01' and SrcArbpl eq 'WCEN002'",
+        )
+        self.assertEqual(
+            result["alternate_source"],
+            "ZALT_WC_FINDER_SRV Class 019 operation classification",
+        )
+        self.assertEqual(result["alternate_count"], 1)
+        self.assertEqual(result["alternates"][0]["work_center"], "WCEN003")
+        self.assertEqual(result["alternates"][0]["routing_type"], "N")
+        self.assertEqual(result["alternates"][0]["routing_group"], "50000189")
+        self.assertEqual(result["alternates"][0]["routing_counter"], "1")
+        self.assertEqual(result["alternates"][0]["capacity_status"], "within_capacity")
+        self.assertEqual(result["alternates"][0]["source_characteristic"], "ALTERNATE_RESOURCES")
+        analyze.assert_called_once_with(
+            plant="PL01",
+            work_center="WCEN003",
+            start_date="2026-10-23",
+            end_date="2026-10-23",
+            bucket_type="D",
+        )
+
     @patch.object(tools, "S4_BASE_URL", "https://s4.example")
     @patch.object(tools, "S4_USER", "reader")
     @patch.object(tools, "S4_PASSWORD", "secret")

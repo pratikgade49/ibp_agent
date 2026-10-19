@@ -105,6 +105,13 @@ For get_sales_history_status, report readiness and continuity separately: \
 ready=true means the target period has ACTUALSQTY data; \
 inconsistency_detected=true is a warning about missing historical periods and \
 must not be reported as not ready unless ready=false.
+For forecast anomaly requests, call detect_forecast_anomalies. When the planner
+asks for all products or a portfolio-wide scan, set all_products=true, do not
+carry over a product filter from earlier turns, and use result_scope='product'
+to aggregate each product across locations and customers. Report every anomaly
+returned; normal products are omitted because they have no detected anomaly.
+For a specific product/location/customer breakdown, pass the requested filters
+and use result_scope='combination'.
 For aggregated readiness requests, call get_sales_history_status with \
 result_scope='product', 'location', or 'customer' as appropriate. These scopes \
 aggregate ACTUALSQTY across the other dimensions. Use result_scope='combination' \
@@ -292,10 +299,11 @@ TOOL_SCHEMAS = [
    },
    {
        "name": "detect_forecast_anomalies",
-         "description": "Scan statistical forecast time series for spikes, drops, and flatlines. Include the detected period. Use result_scope='product' to aggregate each product across locations and customers, or 'combination' for separate detail series.",
+                 "description": "Scan statistical forecast time series for spikes, drops, and flatlines. Include the detected period. For all products, set all_products=true and result_scope='product'; this ignores any product filter carried over from conversation context and returns each anomalous product. Use result_scope='combination' for separate location/customer detail.",
        "input_schema": {
            "type": "object",
            "properties": {
+                             "all_products": {"type": "boolean", "description": "Set true when the user requests all products or a portfolio-wide scan; overrides the product filter"},
                "product": {"type": "string", "description": "Optional product ID"},
                "location": {"type": "string", "description": "Optional location ID"},
                "customer": {"type": "string", "description": "Optional customer ID"},
