@@ -20,6 +20,7 @@ S4_ALTERNATE_WORK_CENTERS_ROOT = os.environ.get(
     "S4_ALTERNATE_WORK_CENTERS_ROOT",
     "/sap/opu/odata/sap/ZALT_WC_FINDER_SRV",
 ).rstrip("/")
+S4_PRODUCTION_ORDERS_ROOT = "/sap/opu/odata/sap/API_PRODUCTION_ORDER_2_SRV"
 
 
 def _odata_literal(value: str) -> str:
@@ -204,24 +205,26 @@ def _onpremise_destination_request_config() -> tuple[str, dict]:
     }
 
 
+def _s4_request_config() -> tuple[str, dict]:
+    if S4_DESTINATION_NAME:
+        return _onpremise_destination_request_config()
+    if not S4_BASE_URL:
+        raise RuntimeError("S4_BASE_URL is not configured")
+    if not S4_USER or not S4_PASSWORD:
+        raise RuntimeError("S4_USER and S4_PASSWORD must be configured")
+    return S4_BASE_URL, {
+        "auth": (S4_USER, S4_PASSWORD),
+        "headers": {"Accept": "application/json"},
+        "timeout": S4_API_TIMEOUT_SECONDS,
+    }
+
+
 def _s4_get(
     entity_path: str,
     params: dict | None = None,
     service_root: str = S4_WORK_CENTERS_ROOT,
 ) -> dict:
-    if S4_DESTINATION_NAME:
-        base_url, request_options = _onpremise_destination_request_config()
-    else:
-        if not S4_BASE_URL:
-            raise RuntimeError("S4_BASE_URL is not configured")
-        if not S4_USER or not S4_PASSWORD:
-            raise RuntimeError("S4_USER and S4_PASSWORD must be configured")
-        base_url = S4_BASE_URL
-        request_options = {
-            "auth": (S4_USER, S4_PASSWORD),
-            "headers": {"Accept": "application/json"},
-            "timeout": S4_API_TIMEOUT_SECONDS,
-        }
+    base_url, request_options = _s4_request_config()
 
     request_url = f"{base_url}{service_root}/{entity_path}"
     response = requests.get(
@@ -838,4 +841,279 @@ def recommend_s4_routing_alternates(
             if alternates
             else "The alternate-work-center finder returned no MATCH rows for this routing operation."
         ),
+    }
+
+
+def update_s4_production_order_operation_work_center(
+    order_id: str,
+    operation: str,
+    target_work_center: str,
+    evaluation_date: str,
+    approval_phrase: str = "",
+    sequence: str | None = None,
+) -> dict:
+    """Prepare or explicitly approve a Class 019-validated operation reassignment."""
+    if not all((order_id, operation, target_work_center)):
+        raise ValueError("order_id, operation, and target_work_center are required")
+    try:
+        datetime.strptime(evaluation_date, "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("evaluation_date must use YYYY-MM-DD format") from exc
+
+    order_key = _odata_literal(order_id)
+    order_payload = _s4_get(
+        f"A_ProductionOrder_2('{order_key}')",
+        {"$expand": "to_ProductionOrderOperation", "$format": "json"},
+        service_root=S4_PRODUCTION_ORDERS_ROOT,
+    )
+    order = order_payload.get("d", order_payload)
+    operation_rows = _collection_rows(order.get("to_ProductionOrderOperation", {}))
+    matching_operations = [
+        row
+        for row in operation_rows
+        if str(row.get("ManufacturingOrderOperation", "")).strip() == operation
+        and (
+            sequence is None
+            or str(row.get("ManufacturingOrderSequence", "")).strip() == sequence
+        )
+    ]
+    if not matching_operations:
+        return {
+            "status": "operation_not_found",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "message": "SAP returned no matching production-order operation.",
+        }
+    if len(matching_operations) > 1:
+        return {
+            "status": "operation_ambiguous",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "message": "Multiple matching operation sequences exist; provide sequence to identify one.",
+        }
+
+    current = matching_operations[0]
+    current_work_center = str(current.get("WorkCenter", "")).strip()
+    plant = str(current.get("ProductionPlant", "")).strip()
+    material = str(order.get("Material", "")).strip()
+    if not plant or not current_work_center or not material:
+        raise RuntimeError(
+            "SAP operation/order data must include ProductionPlant, WorkCenter, and Material"
+        )
+    if current_work_center == target_work_center:
+        return {
+            "status": "already_assigned",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "work_center": target_work_center,
+            "message": "The operation is already assigned to the requested work center.",
+        }
+
+    finder_rows = _collection_rows(
+        _s4_get(
+            "AlternateWCSet",
+            {
+                "$filter": (
+                    f"SrcWerks eq '{_odata_literal(plant)}' and "
+                    f"SrcArbpl eq '{_odata_literal(current_work_center)}'"
+                ),
+                "$format": "json",
+            },
+            service_root=S4_ALTERNATE_WORK_CENTERS_ROOT,
+        )
+    )
+    matching_alternates = [
+        row
+        for row in finder_rows
+        if _same_sap_order_id(row.get("Aufnr"), order_id)
+        and str(row.get("Vornr", "")).strip() == operation
+        and str(row.get("Matnr", "")).strip() == material
+        and str(row.get("AltWerks", "")).strip() == plant
+        and str(row.get("AltArbpl", "")).strip() == target_work_center
+        and str(row.get("MatchStatus", "")).strip().upper() == "MATCH"
+    ]
+    if not matching_alternates:
+        return {
+            "status": "target_not_classified_alternate",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "plant": plant,
+            "current_work_center": current_work_center,
+            "target_work_center": target_work_center,
+            "message": "The Class 019 finder did not return this target as a MATCH for the operation.",
+        }
+
+    capacity_result = analyze_s4_capacity_load(
+        plant=plant,
+        work_center=target_work_center,
+        start_date=evaluation_date,
+        end_date=evaluation_date,
+        bucket_type="D",
+    )
+    capacity_rows = capacity_result["capacity_evaluations"]
+    if not capacity_rows or not all(
+        row.get("remaining_capacity") is not None
+        and row["remaining_capacity"] >= 0
+        for row in capacity_rows
+    ):
+        return {
+            "status": "target_capacity_not_confirmed",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "plant": plant,
+            "current_work_center": current_work_center,
+            "target_work_center": target_work_center,
+            "evaluation_date": evaluation_date,
+            "capacity_evaluations": capacity_rows,
+            "message": "SAP did not return only nonnegative remaining-capacity buckets for the target work center/date.",
+        }
+
+    target_rows = _collection_rows(
+        _s4_get(
+            "A_WorkCenters",
+            {
+                "$filter": (
+                    f"Plant eq '{_odata_literal(plant)}' and "
+                    f"WorkCenter eq '{_odata_literal(target_work_center)}'"
+                ),
+                "$format": "json",
+            },
+        )
+    )
+    if len(target_rows) != 1:
+        return {
+            "status": "target_work_center_not_unique",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "plant": plant,
+            "target_work_center": target_work_center,
+            "target_count": len(target_rows),
+            "message": "SAP work-center master did not resolve the target to exactly one work-center identity.",
+        }
+    target_center = target_rows[0]
+    target_internal_id = str(target_center.get("WorkCenterInternalID", "")).strip()
+    target_type_code = str(target_center.get("WorkCenterTypeCode", "")).strip()
+    if not target_internal_id or not target_type_code:
+        raise RuntimeError("SAP target work-center master is missing its internal ID or type code")
+
+    blocked_flags = (
+        "OperationIsConfirmed",
+        "OperationIsTechlyCompleted",
+        "OperationIsClosed",
+        "OperationIsDeleted",
+    )
+    if any(str(current.get(flag, "")).strip().upper() in {"X", "TRUE"} for flag in blocked_flags):
+        return {
+            "status": "operation_status_blocks_update",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "current_work_center": current_work_center,
+            "target_work_center": target_work_center,
+            "message": "The operation is confirmed, completed, closed, or deleted; reassignment was not attempted.",
+        }
+
+    expected_approval = f"APPROVE {order_id} {operation} {target_work_center} ON {evaluation_date}"
+    if approval_phrase.strip() != expected_approval:
+        return {
+            "status": "approval_required",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "plant": plant,
+            "material": material,
+            "current_work_center": current_work_center,
+            "target_work_center": target_work_center,
+            "target_work_center_internal_id": target_internal_id,
+            "target_work_center_type_code": target_type_code,
+            "evaluation_date": evaluation_date,
+            "classification_match": matching_alternates[0],
+            "capacity_evaluations": capacity_rows,
+            "approval_phrase": expected_approval,
+            "message": "No SAP change was made. Explicit approval of this exact reassignment is required.",
+        }
+
+    internal_order_id = str(current.get("OrderInternalBillOfOperations", "")).strip()
+    internal_operation_id = str(current.get("OrderIntBillOfOperationsItem", "")).strip()
+    if not internal_order_id or not internal_operation_id:
+        raise RuntimeError("SAP operation response is missing its internal entity keys")
+    operation_entity = (
+        "A_ProductionOrderOperation_2("
+        f"OrderInternalBillOfOperations='{_odata_literal(internal_order_id)}',"
+        f"OrderIntBillOfOperationsItem='{_odata_literal(internal_operation_id)}')"
+    )
+    base_url, request_options = _s4_request_config()
+    operation_url = f"{base_url}{S4_PRODUCTION_ORDERS_ROOT}/{operation_entity}"
+    csrf_options = dict(request_options)
+    csrf_options["headers"] = {
+        **request_options.get("headers", {}),
+        "x-csrf-token": "Fetch",
+    }
+    csrf_response = requests.get(
+        operation_url,
+        params={"$format": "json"},
+        **csrf_options,
+    )
+    if not csrf_response.ok:
+        raise RuntimeError(
+            f"Could not fetch SAP CSRF token (HTTP {csrf_response.status_code})"
+        )
+    csrf_token = csrf_response.headers.get("x-csrf-token")
+    csrf_payload = csrf_response.json()
+    csrf_operation = csrf_payload.get("d", csrf_payload)
+    etag = csrf_response.headers.get("ETag") or csrf_operation.get(
+        "__metadata", {}
+    ).get("etag")
+    if not csrf_token or not etag:
+        raise RuntimeError("SAP response must include both CSRF token and ETag")
+
+    patch_options = dict(request_options)
+    patch_options["headers"] = {
+        **request_options.get("headers", {}),
+        "x-csrf-token": csrf_token,
+        "If-Match": etag,
+        "Content-Type": "application/json",
+    }
+    patch_options["cookies"] = csrf_response.cookies
+    patch_response = requests.patch(
+        operation_url,
+        json={"WorkCenter": target_work_center},
+        **patch_options,
+    )
+    if not patch_response.ok:
+        raise RuntimeError(
+            f"SAP production-order operation update failed with HTTP "
+            f"{patch_response.status_code}: {patch_response.text}"
+        )
+
+    verify_payload = _s4_get(
+        operation_entity,
+        {"$format": "json"},
+        service_root=S4_PRODUCTION_ORDERS_ROOT,
+    )
+    verified_operation = verify_payload.get("d", verify_payload)
+    verified_work_center = str(verified_operation.get("WorkCenter", "")).strip()
+    if verified_work_center != target_work_center:
+        raise RuntimeError(
+            "SAP accepted the update, but the follow-up read did not confirm the target work center"
+        )
+
+    return {
+        "status": "updated",
+        "read_only": False,
+        "order_id": order_id,
+        "operation": operation,
+        "plant": plant,
+        "material": material,
+        "previous_work_center": current_work_center,
+        "work_center": verified_work_center,
+        "evaluation_date": evaluation_date,
+        "capacity_evaluations": capacity_rows,
+        "message": "SAP confirmed the production-order operation work-center update.",
     }

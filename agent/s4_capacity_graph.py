@@ -13,6 +13,7 @@ from agent.s4_capacity_tools import (
     recommend_s4_group_alternates,
     recommend_s4_routing_alternates,
     read_s4_work_center_capacities,
+    update_s4_production_order_operation_work_center,
 )
 
 
@@ -54,9 +55,9 @@ For every overloaded bucket provided in the compact tool summary, report its
 recommended_actions in the same response. If the summary says details or
 contributors were omitted, disclose that and point to the attached evidence.
 They are advisory next steps only: do not imply that any order was
-rescheduled or any capacity changed, and never write to SAP. Recommend moving
-orders only to dates with SAP-returned nonnegative remaining capacity. Be
-explicit about incomplete or empty results.
+rescheduled or any capacity changed. Recommend moving orders only to dates
+with SAP-returned nonnegative remaining capacity. Be explicit about incomplete
+or empty results.
 When an overloaded bucket has order, operation, and material contributors,
 call recommend_s4_routing_alternates with those values, the source plant/work
 center, and overload date. ZALT_WC_FINDER_SRV is the authoritative finder for
@@ -71,7 +72,17 @@ not guess; use recommend_s4_group_alternates only when group-based alternates
 are appropriate. It checks configured work-center group members' evaluated
 capacity. Never infer alternates from work-center category or similarity.
 If neither source returns candidates, state which lookup returned no result.
-This is advisory and read-only; never dispatch or reschedule an operation.
+If the user asks to reassign an operation, use
+update_s4_production_order_operation_work_center to prepare the specific change.
+The first call is read-only and returns an exact approval_phrase. Show that
+phrase to the user and make no change yet. A later user message must consist
+exactly of that approval phrase before you pass it as approval_phrase to the
+tool. Never infer approval from general assent, prior conversation, or your own
+tool call. The update tool revalidates the Class 019 match and SAP capacity,
+uses SAP CSRF token and ETag headers, and verifies the update by reading it
+back. It only updates WorkCenter; never claim the order was changed unless the
+tool returns status updated. This is advisory; do not dispatch or reschedule
+other operations.
 """
 
 TOOL_REGISTRY = {
@@ -79,6 +90,7 @@ TOOL_REGISTRY = {
     "analyze_s4_capacity_load": analyze_s4_capacity_load,
     "recommend_s4_group_alternates": recommend_s4_group_alternates,
     "recommend_s4_routing_alternates": recommend_s4_routing_alternates,
+    "update_s4_production_order_operation_work_center": update_s4_production_order_operation_work_center,
 }
 MAX_S4_HISTORY_MESSAGES = 12
 
@@ -161,6 +173,29 @@ TOOL_SCHEMAS = [
                 "evaluation_date": {"type": "string", "description": "Overload date, YYYY-MM-DD"},
             },
             "required": ["plant", "work_center", "order_id", "operation", "material", "evaluation_date"],
+        },
+    },
+    {
+        "name": "update_s4_production_order_operation_work_center",
+        "description": (
+            "Prepare or explicitly approve reassignment of one production-order "
+            "operation to a Class 019-matched alternate work center. First call "
+            "without approval_phrase to validate the Class 019 match and target "
+            "capacity; this is read-only and returns the exact approval phrase. "
+            "Only a separate user message exactly equal to that phrase authorizes "
+            "the PATCH. The tool then updates WorkCenter and reads it back."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "Production order ID"},
+                "operation": {"type": "string", "description": "Production order operation number"},
+                "target_work_center": {"type": "string", "description": "Class 019-matched target work center"},
+                "evaluation_date": {"type": "string", "description": "Capacity evaluation date, YYYY-MM-DD"},
+                "sequence": {"type": "string", "description": "Optional order sequence when the operation number is not unique"},
+                "approval_phrase": {"type": "string", "description": "Exact approval phrase returned by the prior preparation call; omit until explicitly confirmed"},
+            },
+            "required": ["order_id", "operation", "target_work_center", "evaluation_date"],
         },
     },
 ]
@@ -337,6 +372,10 @@ def _tool_node(state: S4AgentState) -> dict:
             )
             if relative_range:
                 tool_input["start_date"], tool_input["end_date"] = relative_range
+        if name == "update_s4_production_order_operation_work_center":
+            supplied_phrase = str(tool_input.get("approval_phrase", "")).strip()
+            if supplied_phrase != _latest_user_text(state["messages"]).strip():
+                tool_input["approval_phrase"] = ""
         try:
             result = TOOL_REGISTRY[name](**tool_input)
         except Exception as exc:

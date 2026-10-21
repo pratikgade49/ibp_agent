@@ -282,6 +282,166 @@ class S4CapacityReaderTests(unittest.TestCase):
             bucket_type="D",
         )
 
+    def test_operation_update_prepares_approval_without_writing(self):
+        order = {
+            "Material": "3000190",
+            "to_ProductionOrderOperation": {
+                "results": [
+                    {
+                        "ManufacturingOrderOperation": "0010",
+                        "ManufacturingOrderSequence": "000001",
+                        "ProductionPlant": "PL01",
+                        "WorkCenter": "WCEN003",
+                        "OrderInternalBillOfOperations": "0000005081",
+                        "OrderIntBillOfOperationsItem": "00000001",
+                        "OperationIsConfirmed": "",
+                    }
+                ]
+            },
+        }
+        match = {
+            "Aufnr": "1001785",
+            "Vornr": "0010",
+            "Matnr": "3000190",
+            "AltWerks": "PL01",
+            "AltArbpl": "WCEN006",
+            "MatchStatus": "MATCH",
+        }
+        with patch.object(
+            tools,
+            "_s4_get",
+            side_effect=[
+                order,
+                {"d": {"results": [match]}},
+                {
+                    "d": {
+                        "results": [
+                            {
+                                "WorkCenter": "WCEN006",
+                                "Plant": "PL01",
+                                "WorkCenterInternalID": "10000291",
+                                "WorkCenterTypeCode": "A",
+                            }
+                        ]
+                    }
+                },
+            ],
+        ), patch.object(
+            tools,
+            "analyze_s4_capacity_load",
+            return_value={
+                "capacity_evaluations": [
+                    {"remaining_capacity": 8.0, "status": "within_capacity"}
+                ]
+            },
+        ), patch.object(tools.requests, "patch") as patch_request:
+            result = tools.update_s4_production_order_operation_work_center(
+                order_id="000001001785",
+                operation="0010",
+                target_work_center="WCEN006",
+                evaluation_date="2026-10-23",
+                sequence="000001",
+            )
+
+        self.assertEqual(result["status"], "approval_required")
+        self.assertEqual(
+            result["approval_phrase"],
+            "APPROVE 000001001785 0010 WCEN006 ON 2026-10-23",
+        )
+        self.assertTrue(result["read_only"])
+        patch_request.assert_not_called()
+
+    @patch.object(tools, "S4_BASE_URL", "https://s4.example")
+    @patch.object(tools, "S4_USER", "reader")
+    @patch.object(tools, "S4_PASSWORD", "secret")
+    def test_operation_update_with_exact_approval_patches_and_verifies(self):
+        order = {
+            "Material": "3000190",
+            "to_ProductionOrderOperation": {
+                "results": [
+                    {
+                        "ManufacturingOrderOperation": "0010",
+                        "ManufacturingOrderSequence": "000001",
+                        "ProductionPlant": "PL01",
+                        "WorkCenter": "WCEN003",
+                        "OrderInternalBillOfOperations": "0000005081",
+                        "OrderIntBillOfOperationsItem": "00000001",
+                    }
+                ]
+            },
+        }
+        match = {
+            "Aufnr": "1001785",
+            "Vornr": "0010",
+            "Matnr": "3000190",
+            "AltWerks": "PL01",
+            "AltArbpl": "WCEN006",
+            "MatchStatus": "MATCH",
+        }
+        csrf_response = Mock(
+            ok=True,
+            headers={"x-csrf-token": "csrf-token", "ETag": 'W/"etag-1"'},
+            cookies={"sap-session": "session-cookie"},
+            json=lambda: {"d": {"WorkCenter": "WCEN003"}},
+        )
+        patch_response = Mock(ok=True, status_code=204, text="")
+        with patch.object(
+            tools,
+            "_s4_get",
+            side_effect=[
+                order,
+                {"d": {"results": [match]}},
+                {
+                    "d": {
+                        "results": [
+                            {
+                                "WorkCenter": "WCEN006",
+                                "Plant": "PL01",
+                                "WorkCenterInternalID": "10000291",
+                                "WorkCenterTypeCode": "A",
+                            }
+                        ]
+                    }
+                },
+                {"d": {"WorkCenter": "WCEN006"}},
+            ],
+        ), patch.object(
+            tools,
+            "analyze_s4_capacity_load",
+            return_value={
+                "capacity_evaluations": [
+                    {"remaining_capacity": 8.0, "status": "within_capacity"}
+                ]
+            },
+        ), patch.object(
+            tools.requests,
+            "get",
+            return_value=csrf_response,
+        ) as csrf_get, patch.object(
+            tools.requests,
+            "patch",
+            return_value=patch_response,
+        ) as patch_request:
+            result = tools.update_s4_production_order_operation_work_center(
+                order_id="000001001785",
+                operation="0010",
+                target_work_center="WCEN006",
+                evaluation_date="2026-10-23",
+                approval_phrase="APPROVE 000001001785 0010 WCEN006 ON 2026-10-23",
+                sequence="000001",
+            )
+
+        self.assertEqual(result["status"], "updated")
+        self.assertFalse(result["read_only"])
+        self.assertEqual(result["work_center"], "WCEN006")
+        self.assertIn("OrderInternalBillOfOperations='0000005081'", csrf_get.call_args.args[0])
+        self.assertEqual(
+            patch_request.call_args.kwargs["json"],
+            {"WorkCenter": "WCEN006"},
+        )
+        self.assertEqual(patch_request.call_args.kwargs["headers"]["If-Match"], 'W/"etag-1"')
+        self.assertEqual(patch_request.call_args.kwargs["headers"]["x-csrf-token"], "csrf-token")
+
     @patch.object(tools, "S4_BASE_URL", "https://s4.example")
     @patch.object(tools, "S4_USER", "reader")
     @patch.object(tools, "S4_PASSWORD", "secret")

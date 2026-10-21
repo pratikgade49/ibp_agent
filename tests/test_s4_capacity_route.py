@@ -216,6 +216,57 @@ class S4CapacityRouteTests(unittest.TestCase):
         self.assertEqual(captured_inputs[0]["start_date"], "2026-10-19")
         self.assertEqual(captured_inputs[0]["end_date"], "2026-10-21")
 
+    def test_operation_update_requires_exact_latest_user_approval(self):
+        approval = "APPROVE 000001001785 0010 WCEN006 ON 2026-10-23"
+        captured_inputs = []
+        state = {
+            "messages": [
+                {"role": "user", "content": "Yes, do it"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call-1",
+                            "name": "update_s4_production_order_operation_work_center",
+                            "input": {
+                                "order_id": "000001001785",
+                                "operation": "0010",
+                                "target_work_center": "WCEN006",
+                                "evaluation_date": "2026-10-23",
+                                "approval_phrase": approval,
+                            },
+                        }
+                    ],
+                },
+            ],
+            "insights": [],
+        }
+        with patch.dict(
+            s4_capacity_graph.TOOL_REGISTRY,
+            {
+                "update_s4_production_order_operation_work_center": (
+                    lambda **kwargs: captured_inputs.append(kwargs) or {"status": "ok"}
+                )
+            },
+        ):
+            s4_capacity_graph._tool_node(state)
+
+        self.assertEqual(captured_inputs[0]["approval_phrase"], "")
+
+        state["messages"][0]["content"] = approval
+        with patch.dict(
+            s4_capacity_graph.TOOL_REGISTRY,
+            {
+                "update_s4_production_order_operation_work_center": (
+                    lambda **kwargs: captured_inputs.append(kwargs) or {"status": "ok"}
+                )
+            },
+        ):
+            s4_capacity_graph._tool_node(state)
+
+        self.assertEqual(captured_inputs[1]["approval_phrase"], approval)
+
     def test_s4_model_history_is_limited_to_recent_messages(self):
         captured = {}
 
