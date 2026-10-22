@@ -678,8 +678,8 @@ def analyze_s4_capacity_load(
             }
         if evaluation["status"] == "overloaded":
             evaluation["recommended_actions"] = [
-                "Check the SAP work-center group for configured alternate work centers, then verify their capacity before proposing a move.",
-                "Do not move or dispatch the operation automatically; confirm the selected alternate and schedule with the planner.",
+                "I recommend checking for an alternate work center and confirming it has enough available capacity before proposing a move.",
+                "Please confirm the selected work center and schedule with the planner before making any changes.",
             ]
         evaluations.append(evaluation)
 

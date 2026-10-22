@@ -45,23 +45,38 @@ remaining capacity as overloaded according to SAP's evaluation; do not
 recalculate aggregate demand from operation standard-work fields or sum
 contributors in place of the aggregate bucket. List contributor orders and
 their SAP-evaluated capacity requirements. If no evaluation rows are returned,
-say that SAP returned no evaluated buckets; do not infer from standard values.
+say that no evaluated capacity data was returned; do not infer from standard values.
+Write for a nontechnical planner. Speak in the agent's first-person voice when
+giving guidance (for example, "I recommend...") and avoid repeatedly naming
+SAP or exposing internal service, API, class, or classification names. For
+each overloaded date, include the plant, work center, required capacity,
+available capacity, remaining capacity, utilization, and every contributing
+order with its order ID, operation, material, required capacity, and unit when
+available. Use one compact Markdown table for the overloaded buckets, with
+orders and alternate findings in the same row; avoid repeating headings or
+long introductory prose. Give concise guidance under a heading named
+"Recommended Action". Use alternate_assessments from the capacity result to
+recommend a specific alternate only when its capacity fit is confirmed for the
+operation. If no suitable alternate was found, say so directly and recommend
+planner review without suggesting an unverified move. Do not mention internal
+service, API, finder, or classification names. Avoid repeating the system name
+when a simple first-person explanation is clearer.
 For date ranges, report the returned evaluated-bucket count and dates. Only
 describe a date as within capacity when SAP returned a bucket for that date
 with nonnegative remaining capacity. Do not claim unreturned dates were within
 capacity; state that no bucket was returned for them and their status is
 unverified. A single returned bucket does not establish coverage of the full
 requested date range.
-For every overloaded bucket provided in the compact tool summary, report its
-recommended_actions in the same response. If the summary says details or
-contributors were omitted, disclose that and point to the attached evidence.
-They are advisory next steps only: do not imply that any order was
-rescheduled or any capacity changed. Recommend moving orders only to dates
-with SAP-returned nonnegative remaining capacity. Be explicit about incomplete
-or empty results.
-When an overloaded bucket has order, operation, and material contributors,
-call recommend_s4_routing_alternates with those values, the source plant/work
-center, and overload date. ZALT_WC_FINDER_SRV is the authoritative finder for
+For every overloaded bucket provided in the compact tool summary, include all
+available contributing orders and their alternate assessment. If the summary
+says details or contributors were omitted, disclose that and point to the
+attached evidence. These are advisory next steps only: do not imply that any
+order was rescheduled or any capacity changed. Recommend moving orders only to
+dates with evaluated nonnegative remaining capacity. Be explicit about
+incomplete or empty results.
+Alternate work-center assessments are automatically included with capacity
+analysis for each overloaded contributor. Use those results rather than
+requesting the same lookup again. ZALT_WC_FINDER_SRV is the authoritative finder for
 the Class 019 operation classification: it compares the operation's assigned
 class/characteristic values to alternate work-center assignments. Order,
 operation, material, plant, and source work center identify the exact operation
@@ -105,6 +120,7 @@ TOOL_REGISTRY = {
 }
 MAX_S4_HISTORY_MESSAGES = 12
 MAX_GRAPH_STEPS = 16  # each tool round trip uses two steps
+S4_RESPONSE_MAX_TOKENS = 4096
 # Canned CNC-04 demo replies never touch SAP. They are only active when
 # S4_AGENT_DEMO_MODE is explicitly enabled.
 DEMO_MODE = os.environ.get("S4_AGENT_DEMO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -287,6 +303,7 @@ def _agent_node(state: S4AgentState) -> dict:
                 system=f"Current server date: {date.today().isoformat()}.\n\n{SYSTEM_PROMPT}",
                 messages=state["messages"],
                 tools=TOOL_SCHEMAS,
+                max_tokens=S4_RESPONSE_MAX_TOKENS,
             )
         ]
     }
@@ -370,7 +387,84 @@ def _capacity_model_summary(result: dict) -> dict:
         "contributor_count": result.get("contributor_count", len(result.get("contributors", []))),
         "overloaded_contributors": contributors[:max_contributor_rows],
         "overloaded_contributors_omitted": max(0, len(contributors) - max_contributor_rows),
+        "alternate_assessments": result.get("alternate_assessments", []),
     }
+
+
+def _assess_overloaded_alternates(result: dict) -> list[dict]:
+    evaluations = result.get("capacity_evaluations", [])
+    overloaded_keys = {
+        (str(row.get("date")), str(row.get("plant")), str(row.get("work_center")))
+        for row in evaluations
+        if isinstance(row, dict) and row.get("status") == "overloaded"
+    }
+    seen = set()
+    assessments = []
+    for contributor in result.get("contributors", []):
+        if not isinstance(contributor, dict):
+            continue
+        key = (
+            str(contributor.get("date")),
+            str(contributor.get("plant")),
+            str(contributor.get("work_center")),
+        )
+        identity = key + (
+            str(contributor.get("order_id")),
+            str(contributor.get("operation")),
+            str(contributor.get("material")),
+        )
+        if key not in overloaded_keys or identity in seen:
+            continue
+        seen.add(identity)
+        required_fields = (
+            "plant", "work_center", "order_id", "operation", "material", "date"
+        )
+        if not all(contributor.get(field) for field in required_fields):
+            assessments.append({
+                "date": contributor.get("date"),
+                "plant": contributor.get("plant"),
+                "work_center": contributor.get("work_center"),
+                "order_id": contributor.get("order_id"),
+                "operation": contributor.get("operation"),
+                "material": contributor.get("material"),
+                "status": "insufficient_order_details",
+                "alternates": [],
+            })
+            continue
+        try:
+            assessment = recommend_s4_routing_alternates(
+                plant=str(contributor["plant"]),
+                work_center=str(contributor["work_center"]),
+                order_id=str(contributor["order_id"]),
+                operation=str(contributor["operation"]),
+                material=str(contributor["material"]),
+                evaluation_date=str(contributor["date"]),
+            )
+        except Exception as exc:
+            assessment = {"status": "error", "error": str(exc)[:500], "alternates": []}
+        alternates = [
+            {
+                "work_center": alternate.get("work_center"),
+                "plant": alternate.get("plant"),
+                "capacity_status": alternate.get("capacity_status"),
+                "sufficient_for_operation": alternate.get("sufficient_for_operation"),
+                "remaining_after_move": alternate.get("remaining_after_move"),
+            }
+            for alternate in assessment.get("alternates", [])
+        ]
+        assessments.append({
+            "date": contributor.get("date"),
+            "plant": contributor.get("plant"),
+            "work_center": contributor.get("work_center"),
+            "order_id": contributor.get("order_id"),
+            "operation": contributor.get("operation"),
+            "material": contributor.get("material"),
+            "status": assessment.get("status"),
+            "alternate_count": assessment.get("alternate_count", len(alternates)),
+            "alternates": alternates,
+            **({"error": assessment["error"]} if assessment.get("error") else {}),
+        })
+    return assessments
 
 
 def _tool_node(state: S4AgentState) -> dict:
@@ -396,11 +490,14 @@ def _tool_node(state: S4AgentState) -> dict:
             result = TOOL_REGISTRY[name](**tool_input)
         except Exception as exc:
             result = {"error": str(exc)[:1500]}
-        model_result = (
-            _capacity_model_summary(result)
-            if name == "analyze_s4_capacity_load" and "error" not in result
-            else result
-        )
+        if name == "analyze_s4_capacity_load" and "error" not in result:
+            result = {
+                **result,
+                "alternate_assessments": _assess_overloaded_alternates(result),
+            }
+            model_result = _capacity_model_summary(result)
+        else:
+            model_result = result
         tool_results.append(
             {
                 "type": "tool_result",

@@ -171,6 +171,7 @@ function isUsefulData(data: DataRecord | undefined): data is DataRecord {
         Array.isArray(data.alert_results) ||
         Array.isArray(data.anomalies) ||
         data.evidence_type === 's4_capacity_bottleneck' ||
+        Array.isArray(data.capacity_evaluations) ||
         typeof data.ready === 'boolean' ||
         data.key_figures),
   );
@@ -374,6 +375,99 @@ function S4CapacityBottleneckEvidence({ data }: { data: DataRecord }) {
   );
 }
 
+function S4CapacityEvidence({ data }: { data: DataRecord }) {
+  const evaluations = asRecords(data.capacity_evaluations);
+  const overloaded = evaluations.filter((row) => row.status === 'overloaded');
+  const contributors = asRecords(data.contributors);
+  const alternateAssessments = asRecords(data.alternate_assessments);
+  const withinCapacityCount = evaluations.filter((row) => row.status === 'within_capacity').length;
+
+  return (
+    <>
+      <MetricStrip items={[
+        { label: 'Capacity checks', value: data.evaluation_count ?? evaluations.length },
+        { label: 'Bottlenecks', value: overloaded.length, tone: overloaded.length ? 'alert' : '' },
+        { label: 'Within capacity', value: withinCapacityCount },
+      ]} />
+      {overloaded.length === 0 ? (
+        <p className="capacity-empty">No overloaded work centers were found in the returned capacity checks.</p>
+      ) : overloaded.map((bucket, index) => {
+        const relatedOrders = contributors.filter((order) =>
+          String(order.date) === String(bucket.date) &&
+          String(order.plant) === String(bucket.plant) &&
+          String(order.work_center) === String(bucket.work_center),
+        );
+        const orderDetails = relatedOrders.map((order) => {
+          const assessment = alternateAssessments.find((item) =>
+            String(item.date) === String(order.date) &&
+            String(item.plant) === String(order.plant) &&
+            String(item.work_center) === String(order.work_center) &&
+            String(item.order_id) === String(order.order_id) &&
+            String(item.operation) === String(order.operation),
+          );
+          const alternates = asRecords(assessment?.alternates);
+          const suitable = alternates.filter((alternate) => alternate.sufficient_for_operation === true);
+          const alternateSummary = suitable.length
+            ? suitable.map((alternate) => `${formatValue(alternate.work_center)} (${formatValue(alternate.remaining_after_move)} ${formatValue(order.capacity_unit)} remaining)`).join(', ')
+            : !assessment || assessment.status !== 'completed'
+              ? 'Could not verify'
+              : alternates.length
+                ? 'No alternate has enough verified capacity'
+                : 'No suitable alternate found';
+          return { order, assessment, suitable, alternateSummary };
+        });
+        const orderRows = orderDetails.map(({ order, alternateSummary }) => ({
+          Order: order.order_id ?? '-',
+          Operation: order.operation ?? '-',
+          Material: order.material ?? '-',
+          Status: order.operation_status ?? order.order_status ?? '-',
+          'Required capacity': order.required_capacity == null
+            ? 'N/A'
+            : `${formatValue(order.required_capacity)} ${formatValue(order.capacity_unit)}`,
+          'Alternate work center': alternateSummary,
+        }));
+        const actions = Array.isArray(bucket.recommended_actions)
+          ? bucket.recommended_actions.map(String)
+          : [];
+
+        return (
+          <section className="evidence-section" key={`${String(bucket.date)}-${String(bucket.work_center)}-${index}`}>
+            <div className="section-heading">
+              <div>
+                <span className="section-kicker">{formatValue(bucket.date)}</span>
+                <h3>{formatValue(bucket.work_center)} bottleneck</h3>
+              </div>
+              <span className="row-count">{formatValue(bucket.plant)}</span>
+            </div>
+            <MetricStrip items={[
+              { label: 'Required', value: `${formatValue(bucket.required_capacity)} ${formatValue(bucket.capacity_unit)}` },
+              { label: 'Available', value: `${formatValue(bucket.available_capacity)} ${formatValue(bucket.capacity_unit)}` },
+              { label: 'Remaining', value: `${formatValue(bucket.remaining_capacity)} ${formatValue(bucket.capacity_unit)}`, tone: 'alert' },
+              { label: 'Utilization', value: bucket.utilization_percent == null ? 'N/A' : `${formatValue(bucket.utilization_percent)}%` },
+            ]} />
+            <h4 className="evidence-subheading">Orders contributing to this bottleneck</h4>
+            <DataTable rows={orderRows} columns={['Order', 'Operation', 'Material', 'Status', 'Required capacity', 'Alternate work center']} />
+            <div className="recommended-action">
+              <h4>Recommended Action</h4>
+              {orderDetails.length > 0 && alternateAssessments.length > 0
+                ? <ul>{orderDetails.map(({ order, assessment, suitable }) => (
+                    <li key={`${String(order.order_id)}-${String(order.operation)}`}>
+                      {suitable.length > 0
+                        ? `I recommend moving order ${formatValue(order.order_id)}, operation ${formatValue(order.operation)}, to ${suitable.map((alternate) => formatValue(alternate.work_center)).join(' or ')}; capacity fit is verified. Confirm the schedule with the planner before making any change.`
+                          : !assessment || assessment.status !== 'completed'
+                          ? `I could not verify an alternate for order ${formatValue(order.order_id)}, operation ${formatValue(order.operation)}. Please review the schedule with the planner; no change has been made.`
+                          : `I found no suitable alternate with verified capacity for order ${formatValue(order.order_id)}, operation ${formatValue(order.operation)}. Please review the schedule with the planner; no change has been made.`}
+                    </li>
+                  ))}</ul>
+                : <ul>{actions.map((action, actionIndex) => <li key={`${actionIndex}-${action}`}>{action}</li>)}</ul>}
+            </div>
+          </section>
+        );
+      })}
+    </>
+  );
+}
+
 function Evidence({ data }: { data: DataRecord }) {
   const results = asRecords(data.results);
   const alerts = asRecords(data.alert_results);
@@ -381,6 +475,10 @@ function Evidence({ data }: { data: DataRecord }) {
 
   if (data.evidence_type === 's4_capacity_bottleneck') {
     return <S4CapacityBottleneckEvidence data={data} />;
+  }
+
+  if (Array.isArray(data.capacity_evaluations)) {
+    return <S4CapacityEvidence data={data} />;
   }
 
   if (data.master_data_type && Array.isArray(data.results)) {
