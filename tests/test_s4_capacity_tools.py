@@ -351,6 +351,39 @@ class S4CapacityReaderTests(unittest.TestCase):
         self.assertTrue(result["read_only"])
         patch_request.assert_not_called()
 
+    def test_operation_update_stops_for_each_blocked_order_status(self):
+        blocked_status_fields = (
+            "OrderIsDeleted",
+            "OrderIsMarkedForDeletion",
+            "OrderIsTechnicallyCompleted",
+            "OrderIsClosed",
+            "OrderIsLocked",
+        )
+        for blocked_field in blocked_status_fields:
+            with self.subTest(blocked_field=blocked_field):
+                with patch.object(
+                    tools,
+                    "_s4_get",
+                    return_value={"d": {blocked_field: "X"}},
+                ) as get, patch.object(
+                    tools,
+                    "analyze_s4_capacity_load",
+                ) as analyze, patch.object(tools.requests, "patch") as patch_request:
+                    result = tools.update_s4_production_order_operation_work_center(
+                        order_id="000001001800",
+                        operation="0010",
+                        target_work_center="WCEN002",
+                        evaluation_date="2026-10-23",
+                    )
+
+                self.assertEqual(result["status"], "order_status_blocks_update")
+                self.assertEqual(
+                    result["blocked_order_status_fields"], [blocked_field]
+                )
+                self.assertEqual(get.call_count, 1)
+                analyze.assert_not_called()
+                patch_request.assert_not_called()
+
     @patch.object(tools, "S4_BASE_URL", "https://s4.example")
     @patch.object(tools, "S4_USER", "reader")
     @patch.object(tools, "S4_PASSWORD", "secret")

@@ -1,6 +1,8 @@
 """Read SAP S/4HANA work-center capacity and shift configuration."""
 import json
 import os
+import threading
+import time
 from urllib.parse import quote, urljoin, urlsplit
 from datetime import date, datetime, timedelta
 
@@ -21,6 +23,19 @@ S4_ALTERNATE_WORK_CENTERS_ROOT = os.environ.get(
     "/sap/opu/odata/sap/ZALT_WC_FINDER_SRV",
 ).rstrip("/")
 S4_PRODUCTION_ORDERS_ROOT = "/sap/opu/odata/sap/API_PRODUCTION_ORDER_2_SRV"
+
+# Production-order statuses under which SAP refuses operation changes
+# (API_PRODUCTION_ORDER_2_SRV documentation).
+BLOCKING_ORDER_STATUSES = {"DLT", "DLFL", "TECO", "CLSD", "LKD"}
+S4_ERROR_TEXT_LIMIT = 500
+
+# OAuth tokens and the resolved destination are cached so every OData call does
+# not repeat the destination/connectivity round trips.
+_CACHE_LOCK = threading.Lock()
+_TOKEN_CACHE: dict[tuple[str, str], tuple[str, float]] = {}
+_DESTINATION_CACHE: dict[str, tuple[float, tuple[str, dict]]] = {}
+_TOKEN_EXPIRY_MARGIN_SECONDS = 60
+_DESTINATION_CACHE_SECONDS = 300
 
 
 def _odata_literal(value: str) -> str:
@@ -116,8 +131,16 @@ def _oauth_access_token(
     client_secret: str,
     service_label: str,
 ) -> str:
+    endpoint = _oauth_token_endpoint(token_url)
+    cache_key = (endpoint, client_id)
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = _TOKEN_CACHE.get(cache_key)
+        if cached and cached[1] > now:
+            return cached[0]
+
     response = requests.post(
-        _oauth_token_endpoint(token_url),
+        endpoint,
         data={"grant_type": "client_credentials"},
         auth=(client_id, client_secret),
         timeout=S4_API_TIMEOUT_SECONDS,
@@ -127,13 +150,23 @@ def _oauth_access_token(
             f"Could not obtain {service_label} access token "
             f"(HTTP {response.status_code})"
         )
-    token = response.json().get("access_token")
+    payload = response.json()
+    token = payload.get("access_token")
     if not token:
         raise RuntimeError(f"{service_label} token response did not include access_token")
+    try:
+        ttl = float(payload.get("expires_in", 300))
+    except (TypeError, ValueError):
+        ttl = 300.0
+    with _CACHE_LOCK:
+        _TOKEN_CACHE[cache_key] = (
+            token,
+            now + max(ttl - _TOKEN_EXPIRY_MARGIN_SECONDS, 0.0),
+        )
     return token
 
 
-def _onpremise_destination_request_config() -> tuple[str, dict]:
+def _build_onpremise_destination_request_config() -> tuple[str, dict]:
     destination_credentials = _bound_service_credentials("destination")
     uaa = destination_credentials.get("uaa")
     if not isinstance(uaa, dict):
@@ -205,6 +238,21 @@ def _onpremise_destination_request_config() -> tuple[str, dict]:
     }
 
 
+def _onpremise_destination_request_config() -> tuple[str, dict]:
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = _DESTINATION_CACHE.get(S4_DESTINATION_NAME)
+        if cached and cached[0] > now:
+            return cached[1][0], dict(cached[1][1])
+    result = _build_onpremise_destination_request_config()
+    with _CACHE_LOCK:
+        _DESTINATION_CACHE[S4_DESTINATION_NAME] = (
+            now + _DESTINATION_CACHE_SECONDS,
+            result,
+        )
+    return result[0], dict(result[1])
+
+
 def _s4_request_config() -> tuple[str, dict]:
     if S4_DESTINATION_NAME:
         return _onpremise_destination_request_config()
@@ -235,7 +283,7 @@ def _s4_get(
     if not response.ok:
         raise RuntimeError(
             f"S/4HANA capacity request failed with HTTP {response.status_code} "
-            f"for {entity_path}: {response.text}"
+            f"for {entity_path}: {response.text[:S4_ERROR_TEXT_LIMIT]}"
         )
 
     payload = response.json()
@@ -255,7 +303,7 @@ def _s4_get(
         if not page_response.ok:
             raise RuntimeError(
                 f"S/4HANA capacity request failed with HTTP {page_response.status_code} "
-                f"for OData next link: {page_response.text}"
+                f"for OData next link: {page_response.text[:S4_ERROR_TEXT_LIMIT]}"
             )
         page_payload = page_response.json()
         page_data = page_payload.get("d", page_payload)
@@ -428,6 +476,128 @@ def _float_or_none(value: object) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _sap_error_summary(response) -> str:
+    """Return SAP's error code, message and every errordetails entry."""
+    try:
+        error = response.json().get("error", {})
+    except (ValueError, AttributeError):
+        return response.text[:S4_ERROR_TEXT_LIMIT]
+    if not isinstance(error, dict) or not error:
+        return response.text[:S4_ERROR_TEXT_LIMIT]
+    message = error.get("message", "")
+    if isinstance(message, dict):
+        message = message.get("value", "")
+    code = error.get("code")
+    parts = [f"{code}: {message}" if code else str(message)]
+    inner = error.get("innererror", {})
+    details = inner.get("errordetails", []) if isinstance(inner, dict) else []
+    seen = {parts[0]}
+    for detail in details or []:
+        if not isinstance(detail, dict) or not detail.get("message"):
+            continue
+        text = (
+            f"{detail['code']}: {detail['message']}"
+            if detail.get("code")
+            else str(detail["message"])
+        )
+        if text not in seen:
+            seen.add(text)
+            parts.append(text)
+    return " | ".join(parts)[: S4_ERROR_TEXT_LIMIT * 2]
+
+
+def _same_operation(left: object, right: object) -> bool:
+    left_value = str(left or "").strip()
+    right_value = str(right or "").strip()
+    if left_value.isdigit() and right_value.isdigit():
+        return left_value.lstrip("0") == right_value.lstrip("0")
+    return left_value == right_value
+
+
+def _operation_required_capacity(
+    plant: str,
+    work_center: str,
+    order_id: str,
+    operation: str,
+    evaluation_date: str,
+) -> tuple[float | None, str | None]:
+    """Find the SAP-evaluated capacity this operation consumes on the source work center.
+
+    Uses the contributor rows of SAP's own evaluation. If several rows match
+    (one per capacity category), the largest is used, which is conservative.
+    Returns (None, None) when the operation cannot be found.
+    """
+    try:
+        result = analyze_s4_capacity_load(
+            plant=plant,
+            work_center=work_center,
+            start_date=evaluation_date,
+            end_date=evaluation_date,
+            bucket_type="D",
+        )
+    except Exception:
+        return None, None
+    required_values = []
+    unit = None
+    for row in result.get("contributors", []):
+        if (
+            _same_sap_order_id(row.get("order_id"), order_id)
+            and _same_operation(row.get("operation"), operation)
+            and row.get("required_capacity") is not None
+        ):
+            required_values.append(row["required_capacity"])
+            unit = row.get("capacity_unit") or unit
+    if not required_values:
+        return None, None
+    return max(required_values), unit
+
+
+def _capacity_fit(
+    capacity_rows: list[dict],
+    required: float | None,
+    required_unit: str | None,
+) -> dict:
+    """Check whether SAP-evaluated remaining capacity can absorb the operation.
+
+    sufficient_for_operation is None (unverified) when the required capacity is
+    unknown, no buckets were returned, or units differ.
+    """
+    fit = {
+        "required_capacity_for_operation": required,
+        "required_capacity_unit": required_unit,
+        "sufficient_for_operation": None,
+        "remaining_after_move": None,
+    }
+    if required is None or not capacity_rows:
+        return fit
+    remaining_values = []
+    for row in capacity_rows:
+        remaining = row.get("remaining_capacity")
+        row_unit = row.get("capacity_unit")
+        if remaining is None or (required_unit and row_unit and required_unit != row_unit):
+            return fit
+        remaining_values.append(remaining)
+    after = min(remaining_values) - required
+    fit["remaining_after_move"] = round(after, 3)
+    fit["sufficient_for_operation"] = after >= 0
+    return fit
+
+
+def _blocking_order_statuses(order_id: str) -> list[str]:
+    rows = _collection_rows(
+        _s4_get(
+            "A_ProductionOrderStatus_2",
+            {
+                "$filter": f"ManufacturingOrder eq '{_odata_literal(order_id)}'",
+                "$format": "json",
+            },
+            service_root=S4_PRODUCTION_ORDERS_ROOT,
+        )
+    )
+    active = {str(row.get("StatusShortName", "")).strip().upper() for row in rows}
+    return sorted(active & BLOCKING_ORDER_STATUSES)
 
 
 def analyze_s4_capacity_load(
@@ -774,6 +944,11 @@ def recommend_s4_routing_alternates(
         and str(row.get("Matnr", "")).strip() == material
         and str(row.get("MatchStatus", "")).strip().upper() == "MATCH"
     ]
+    required_capacity, required_unit = (
+        _operation_required_capacity(plant, work_center, order_id, operation, evaluation_date)
+        if match_rows
+        else (None, None)
+    )
     for row in match_rows:
         alternate_plant = row.get("AltWerks")
         alternate_work_center = row.get("AltArbpl")
@@ -809,6 +984,7 @@ def recommend_s4_routing_alternates(
                 "plant": alternate_plant,
                 "capacity_status": capacity_status,
                 "capacity_evaluations": capacity_rows,
+                **_capacity_fit(capacity_rows, required_capacity, required_unit),
                 "match_status": row.get("MatchStatus"),
                 "source_class": row.get("SrcClass"),
                 "source_characteristic": row.get("SrcAtnam"),
@@ -833,6 +1009,8 @@ def recommend_s4_routing_alternates(
         "operation": operation,
         "material": material,
         "evaluation_date": evaluation_date,
+        "operation_required_capacity": required_capacity,
+        "operation_required_capacity_unit": required_unit,
         "alternate_source": "ZALT_WC_FINDER_SRV Class 019 operation classification",
         "alternate_count": len(alternates),
         "alternates": alternates,
@@ -912,6 +1090,22 @@ def update_s4_production_order_operation_work_center(
             "message": "The operation is already assigned to the requested work center.",
         }
 
+    try:
+        blocking_statuses = _blocking_order_statuses(
+            str(order.get("ManufacturingOrder") or order_id)
+        )
+    except Exception:
+        blocking_statuses = []  # SAP will still reject a blocked order on PATCH
+    if blocking_statuses:
+        return {
+            "status": "order_status_blocks_update",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "blocking_statuses": blocking_statuses,
+            "message": "The production order is deleted, technically completed, closed, or locked; reassignment was not attempted.",
+        }
+
     finder_rows = _collection_rows(
         _s4_get(
             "AlternateWCSet",
@@ -971,6 +1165,25 @@ def update_s4_production_order_operation_work_center(
             "evaluation_date": evaluation_date,
             "capacity_evaluations": capacity_rows,
             "message": "SAP did not return only nonnegative remaining-capacity buckets for the target work center/date.",
+        }
+
+    required_capacity, required_unit = _operation_required_capacity(
+        plant, current_work_center, order_id, operation, evaluation_date
+    )
+    capacity_fit = _capacity_fit(capacity_rows, required_capacity, required_unit)
+    if capacity_fit["sufficient_for_operation"] is False:
+        return {
+            "status": "target_capacity_insufficient_for_operation",
+            "read_only": True,
+            "order_id": order_id,
+            "operation": operation,
+            "plant": plant,
+            "current_work_center": current_work_center,
+            "target_work_center": target_work_center,
+            "evaluation_date": evaluation_date,
+            "capacity_evaluations": capacity_rows,
+            **capacity_fit,
+            "message": "The target work center's SAP-evaluated remaining capacity is smaller than the capacity this operation requires.",
         }
 
     target_rows = _collection_rows(
@@ -1035,6 +1248,7 @@ def update_s4_production_order_operation_work_center(
             "evaluation_date": evaluation_date,
             "classification_match": matching_alternates[0],
             "capacity_evaluations": capacity_rows,
+            **capacity_fit,
             "approval_phrase": expected_approval,
             "message": "No SAP change was made. Explicit approval of this exact reassignment is required.",
         }
@@ -1070,6 +1284,8 @@ def update_s4_production_order_operation_work_center(
     etag = csrf_response.headers.get("ETag") or csrf_operation.get(
         "__metadata", {}
     ).get("etag")
+    if not etag and csrf_operation.get("LastChangeDateTime"):
+        etag = f'W/"\'{csrf_operation["LastChangeDateTime"]}\'"'
     if not csrf_token or not etag:
         raise RuntimeError("SAP response must include both CSRF token and ETag")
 
@@ -1081,15 +1297,24 @@ def update_s4_production_order_operation_work_center(
         "Content-Type": "application/json",
     }
     patch_options["cookies"] = csrf_response.cookies
+    # SAP resolves AFVGD-ARBPL in the operation's plant, so the plant is sent
+    # together with the work center (as in the API documentation examples).
+    patch_payload = {"WorkCenter": target_work_center, "ProductionPlant": plant}
+    control_profile = str(current.get("OperationControlProfile", "")).strip()
+    if control_profile:
+        patch_payload["OperationControlProfile"] = control_profile
     patch_response = requests.patch(
         operation_url,
-        json={"WorkCenter": target_work_center},
+        json=patch_payload,
         **patch_options,
     )
     if not patch_response.ok:
+        print("S4 PATCH FAILED", operation_url, patch_payload,
+            patch_response.text[:4000], flush=True)  # shows in cf logs
         raise RuntimeError(
             f"SAP production-order operation update failed with HTTP "
-            f"{patch_response.status_code}: {patch_response.text}"
+            f"{patch_response.status_code}: {_sap_error_summary(patch_response)} "
+            f"| payload={patch_payload}"
         )
 
     verify_payload = _s4_get(
@@ -1103,6 +1328,11 @@ def update_s4_production_order_operation_work_center(
         raise RuntimeError(
             "SAP accepted the update, but the follow-up read did not confirm the target work center"
         )
+    verified_internal_id = str(verified_operation.get("WorkCenterInternalID", "")).strip()
+    if verified_internal_id and verified_internal_id.lstrip("0") != target_internal_id.lstrip("0"):
+        raise RuntimeError(
+            "SAP accepted the update, but the follow-up read shows a different work-center internal ID"
+        )
 
     return {
         "status": "updated",
@@ -1115,5 +1345,7 @@ def update_s4_production_order_operation_work_center(
         "work_center": verified_work_center,
         "evaluation_date": evaluation_date,
         "capacity_evaluations": capacity_rows,
+        **capacity_fit,
+        "patched_fields": sorted(patch_payload),
         "message": "SAP confirmed the production-order operation work-center update.",
     }

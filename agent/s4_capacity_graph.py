@@ -1,5 +1,6 @@
 """Read-only SAP S/4HANA capacity agent graph."""
 import json
+import os
 import re
 from datetime import date, timedelta
 from typing import Annotated, TypedDict
@@ -83,6 +84,16 @@ uses SAP CSRF token and ETag headers, and verifies the update by reading it
 back. It only updates WorkCenter; never claim the order was changed unless the
 tool returns status updated. This is advisory; do not dispatch or reschedule
 other operations.
+recommend_s4_routing_alternates also returns operation_required_capacity and,
+per alternate, sufficient_for_operation and remaining_after_move. Recommend only
+alternates where sufficient_for_operation is true. If it is null, say that fit
+could not be verified; if false, say the alternate's remaining capacity is too
+small for the operation. recommend_s4_group_alternates only checks for
+nonnegative remaining capacity, not whether the operation fits; say so.
+If the update tool returns an error, report SAP's error code and every detail
+message exactly as returned and state that no change was made. If it returns
+order_status_blocks_update or target_capacity_insufficient_for_operation,
+explain the reason and state that no change was made.
 """
 
 TOOL_REGISTRY = {
@@ -93,13 +104,18 @@ TOOL_REGISTRY = {
     "update_s4_production_order_operation_work_center": update_s4_production_order_operation_work_center,
 }
 MAX_S4_HISTORY_MESSAGES = 12
+MAX_GRAPH_STEPS = 16  # each tool round trip uses two steps
+# Canned CNC-04 demo replies never touch SAP. They are only active when
+# S4_AGENT_DEMO_MODE is explicitly enabled.
+DEMO_MODE = os.environ.get("S4_AGENT_DEMO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 TOOL_SCHEMAS = [
     {
         "name": "read_s4_work_center_capacities",
         "description": (
             "Read SAP S/4HANA work-center capacity configuration and associated "
-            "weekday shift intervals. Provide a plant, work center, or both. "
+            "weekday shift intervals. Plant and work center are optional; omit both "
+            "to read all accessible work centers. "
             "This tool is read-only and does not calculate order load or bottlenecks."
         ),
         "input_schema": {
@@ -379,7 +395,7 @@ def _tool_node(state: S4AgentState) -> dict:
         try:
             result = TOOL_REGISTRY[name](**tool_input)
         except Exception as exc:
-            result = {"error": str(exc)}
+            result = {"error": str(exc)[:1500]}
         model_result = (
             _capacity_model_summary(result)
             if name == "analyze_s4_capacity_load" and "error" not in result
@@ -408,7 +424,22 @@ def _route_after_agent(state: S4AgentState) -> str:
     return "tool_node" if has_tool_call else END
 
 
-def run_s4_agent_with_data(user_message: str, history: list[dict] | None = None) -> dict:
+def _build_graph():
+    graph = StateGraph(S4AgentState)
+    graph.add_node("agent_node", _agent_node)
+    graph.add_node("tool_node", _tool_node)
+    graph.set_entry_point("agent_node")
+    graph.add_conditional_edges(
+        "agent_node", _route_after_agent, {"tool_node": "tool_node", END: END}
+    )
+    graph.add_edge("tool_node", "agent_node")
+    return graph.compile()
+
+
+_COMPILED_GRAPH = _build_graph()
+
+
+def _demo_response(user_message: str, history: list[dict] | None) -> dict | None:
     normalized_message = " ".join(user_message.casefold().split())
     history_text = " ".join(
         str(message.get("content", ""))
@@ -473,19 +504,21 @@ def run_s4_agent_with_data(user_message: str, history: list[dict] | None = None)
                 }
             ],
         }
+    return None
 
-    graph = StateGraph(S4AgentState)
-    graph.add_node("agent_node", _agent_node)
-    graph.add_node("tool_node", _tool_node)
-    graph.set_entry_point("agent_node")
-    graph.add_conditional_edges(
-        "agent_node", _route_after_agent, {"tool_node": "tool_node", END: END}
-    )
-    graph.add_edge("tool_node", "agent_node")
+
+def run_s4_agent_with_data(user_message: str, history: list[dict] | None = None) -> dict:
+    if DEMO_MODE:
+        demo = _demo_response(user_message, history)
+        if demo is not None:
+            return demo
 
     messages = list(history or [])[-MAX_S4_HISTORY_MESSAGES:]
     messages.append({"role": "user", "content": user_message})
-    final_state = graph.compile().invoke({"messages": messages, "insights": []})
+    final_state = _COMPILED_GRAPH.invoke(
+        {"messages": messages, "insights": []},
+        config={"recursion_limit": MAX_GRAPH_STEPS},
+    )
     last_message = final_state["messages"][-1]
     text_blocks = [
         block["text"]
