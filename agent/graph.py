@@ -110,6 +110,10 @@ asks for all products or a portfolio-wide scan, set all_products=true, do not
 carry over a product filter from earlier turns, and use result_scope='product'
 to aggregate each product across locations and customers. Report every anomaly
 returned; normal products are omitted because they have no detected anomaly.
+Compare the current and coming forecast periods with historical forecast values.
+For a request about the coming five periods, use the detector's default window:
+period_start_rel=-6 and period_end_rel=5. Include the returned forecast series,
+anomaly descriptions, period values, and change amounts in the explanation.
 For a specific product/location/customer breakdown, pass the requested filters
 and use result_scope='combination'.
 For aggregated readiness requests, call get_sales_history_status with \
@@ -291,8 +295,8 @@ TOOL_SCHEMAS = [
                "threshold_pct": {"type": "number", "description": "Variance % threshold, default 20"},
                "result_scope": {"type": "string", "enum": ["product", "combination"], "description": "Use product for aggregated product totals, combination for detailed product/location/customer results"},
                "alert_direction": {"type": "string", "enum": ["over", "under", "both"], "description": "Use over for actual above forecast, under for actual below forecast, both for absolute variance"},
-               "period_start_rel": {"type": "integer", "description": "Relative period start; 0 is current, 1 is next period"},
-               "period_end_rel": {"type": "integer", "description": "Relative period end; use 3 with start 1 for the coming three periods"},
+               "period_start_rel": {"type": "integer", "description": "Relative period start; defaults to -5 to show six periods of history through current"},
+               "period_end_rel": {"type": "integer", "description": "Relative period end; defaults to 0 (current period)"},
            },
            "required": [],
        },
@@ -310,6 +314,8 @@ TOOL_SCHEMAS = [
                "sigma_threshold": {"type": "number", "description": "Anomaly threshold in standard deviations, default 3"},
                "flatline_min_periods": {"type": "integer", "description": "Minimum identical periods for a flatline, default 4"},
                "result_scope": {"type": "string", "enum": ["product", "combination"], "description": "Product aggregates across locations and customers; combination keeps separate series"},
+               "period_start_rel": {"type": "integer", "description": "First relative period to include; default -6 to provide historical baseline"},
+               "period_end_rel": {"type": "integer", "description": "Last relative period to include; default 5 for the current and coming five periods"},
            },
        },
    },

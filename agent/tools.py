@@ -14,6 +14,7 @@ import re
 import statistics
 import uuid
 import xml.etree.ElementTree as ET
+import math
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urljoin
@@ -1503,7 +1504,7 @@ def get_forecast_vs_consumption(
     threshold_pct: float = 20.0,
         result_scope: str = "combination",
         alert_direction: str = "both",
-        period_start_rel: int = 0,
+        period_start_rel: int = -5,
         period_end_rel: int = 0,
     ) -> dict:
     """
@@ -1520,8 +1521,18 @@ def get_forecast_vs_consumption(
     analyses = []
     if USE_MOCK_DATA:
         rows = [
-            {"location": row_location, "product": row_product, **values}
+            {
+                "location": row_location,
+                "product": row_product,
+                "customer": None,
+                "period": _offset_month(
+                    datetime.now(timezone.utc).strftime("%Y-%m"), period_offset
+                ),
+                "forecast": values["forecast"] * (1 + period_offset * 0.015),
+                "actual": values["actual"] * (1 + period_offset * 0.01),
+            }
             for (row_location, row_product), values in _MOCK_FORECAST_VS_CONSUMPTION.items()
+            for period_offset in range(period_start_rel, period_end_rel + 1)
             if (location is None or row_location == location)
             and (product is None or row_product == product)
             and customer is None
@@ -1620,6 +1631,7 @@ def get_forecast_vs_consumption(
             for item in analyses
             if item["alert"]
         ],
+        "comparison_results": analyses,
     }
     if len(analyses) == 1:
         response.update(analyses[0])
@@ -2342,9 +2354,9 @@ def update_adjusted_production(
 # 3. Detect Anomaly in Forecast Pattern
 # ---------------------------------------------------------------------------
 _MOCK_STATISTICAL_FORECAST = {
-    "B1": [1000, 1050, 4200, 1100, 1080, 1120],  # spike in month 3
-    "B4": [800, 800, 800, 800, 800, 800],  # flatline
-    "B7": [1200, 1250, 1230, 1260, 1245, 1255],  # normal
+    "B1": [1000, 1050, 1030, 1040, 1020, 1050, 1030, 4200, 1100, 1080, 1120, 1150],
+    "B4": [800, 800, 800, 800, 800, 800, 800, 800, 800, 800, 800, 800],
+    "B7": [1200, 1250, 1230, 1260, 1245, 1255, 1240, 1260, 1250, 1270, 1265, 1280],
 }
 
 def detect_forecast_anomalies(
@@ -2355,9 +2367,13 @@ def detect_forecast_anomalies(
         flatline_min_periods: int = 4,
     result_scope: str | None = None,
     all_products: bool = False,
+    period_start_rel: int = -6,
+    period_end_rel: int = 5,
     ) -> dict:
     """
         Scan statistical forecast time series for spikes/drops and flatlines.
+        The default window includes six historical periods and the current plus
+        next five periods, so detected changes have a historical baseline.
         Product, location, and customer filters are optional. Product scope
         aggregates each product across locations and customers by period.
     The statistical detection itself runs in deterministic Python, not in the
@@ -2369,18 +2385,27 @@ def detect_forecast_anomalies(
         result_scope = "product" if all_products else "combination"
     if result_scope not in {"product", "combination"}:
         raise ValueError("result_scope must be 'product' or 'combination'")
+    if period_start_rel > period_end_rel:
+        raise ValueError("period_start_rel must not exceed period_end_rel")
     if USE_MOCK_DATA:
+        current_period = datetime.now(timezone.utc).strftime("%Y-%m")
         series_by_key = {
             (row_product, None, None): {
-                index: value for index, value in enumerate(values)
+                _offset_month(current_period, index - 6): value
+                for index, value in enumerate(values)
             }
             for row_product, values in _MOCK_STATISTICAL_FORECAST.items()
             if product is None or row_product == product
         }
+        relative_by_key = {
+            key: {period: index - 6 for index, period in enumerate(values)}
+            for key, values in series_by_key.items()
+        }
     else:
         filters = [
             f"UOMTOID eq '{IBP_UOM_TO_ID}'",
-            f"PERIODID{IBP_PERIOD_LEVEL}_REL ge 0",
+            f"PERIODID{IBP_PERIOD_LEVEL}_REL ge {period_start_rel}",
+            f"PERIODID{IBP_PERIOD_LEVEL}_REL le {period_end_rel}",
         ]
         if product:
             filters.append(f"PRDID eq '{product}'")
@@ -2397,47 +2422,118 @@ def detect_forecast_anomalies(
         )
         rows = result.get("d", {}).get("results", [])
         series_by_key = {}
+        relative_by_key = {}
+        current_period = datetime.now(timezone.utc).strftime("%Y-%m")
         for row in rows:
-            timestamp = row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP", "")
+            timestamp = _period_month(row.get(f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"))
+            if timestamp is None:
+                continue
             key = (row["PRDID"],) if result_scope == "product" else (
                 row["PRDID"], row["LOCID"], row.get("CUSTID")
             )
             series_by_key.setdefault(key, {})
-            series_by_key[key][timestamp] = (
-                series_by_key[key].get(timestamp, 0.0)
-                + float(row["STATISTICALFORECASTQTY"])
-            )
+            relative_by_key.setdefault(key, {})
+            relative_by_key[key][timestamp] = _month_offset(current_period, timestamp)
+            value = row.get("STATISTICALFORECASTQTY")
+            if value is None:
+                series_by_key[key].setdefault(timestamp, None)
+                continue
+            try:
+                quantity = float(value)
+            except (TypeError, ValueError):
+                series_by_key[key].setdefault(timestamp, None)
+                continue
+            if not math.isfinite(quantity):
+                series_by_key[key].setdefault(timestamp, None)
+                continue
+            current_total = series_by_key[key].get(timestamp)
+            series_by_key[key][timestamp] = quantity + (current_total or 0.0)
     anomalies = []
+    forecast_series = []
     for key, values in series_by_key.items():
         if result_scope == "product":
             product_id, location_id, customer_id = key[0], None, None
         else:
             product_id, location_id, customer_id = key
-        period_ids = sorted(values)
-        series = [values[period_id] for period_id in period_ids]
-        series_anomalies = _find_spikes_and_drops(product_id, series, sigma_threshold)
-        series_anomalies.extend(_find_flatlines(product_id, series, flatline_min_periods))
+        observed_periods = sorted(values)
+        period_ids = (
+            _months_between(observed_periods[0], observed_periods[-1])
+            if observed_periods
+            else []
+        )
+        series = [values.get(period_id) for period_id in period_ids]
+        observed_relatives = relative_by_key.get(key, {})
+        first_observed_period = next(
+            (period_id for period_id in period_ids if period_id in observed_relatives),
+            None,
+        )
+        first_relative = observed_relatives.get(first_observed_period, period_start_rel)
+        evaluation_start_index = max(0, 1 - first_relative)
+        series_anomalies = _find_spikes_and_drops(
+            product_id, series, sigma_threshold, evaluation_start_index
+        )
+        horizon_anomalies = _find_flatlines(
+            product_id, series[evaluation_start_index:], flatline_min_periods
+        )
+        for anomaly in horizon_anomalies:
+            anomaly["period_start"] += evaluation_start_index
+        series_anomalies.extend(horizon_anomalies)
         for anomaly in series_anomalies:
             anomaly.update({"location_id": location_id, "customer_id": customer_id})
             if "period_index" in anomaly:
                 anomaly["period"] = _period_month(period_ids[anomaly["period_index"]])
+                anomaly["previous_quantity"] = series[anomaly["period_index"] - 1]
+                anomaly["forecast_quantity"] = series[anomaly["period_index"]]
+                previous = anomaly["previous_quantity"]
+                current = anomaly["forecast_quantity"]
+                anomaly["change_quantity"] = current - previous
+                if previous == 0:
+                    anomaly["pct_change"] = None
+                    anomaly["description"] = (
+                        f"Forecast changed from 0 to {current:g}; percentage change "
+                        "is undefined because the prior forecast was zero."
+                    )
+                else:
+                    anomaly["pct_change"] = round((current - previous) / abs(previous) * 100, 1)
+                    direction = "increased" if current > previous else "decreased"
+                    anomaly["description"] = (
+                        f"Forecast {direction} from {previous:g} to {current:g} "
+                        f"({anomaly['pct_change']:+g}%)."
+                    )
             elif "period_start" in anomaly:
                 start = anomaly["period_start"]
                 end = start + anomaly["period_count"] - 1
                 anomaly["period_start"] = _period_month(period_ids[start])
                 anomaly["period_end"] = _period_month(period_ids[end])
         anomalies.extend(series_anomalies)
+        forecast_series.append({
+            "product_id": product_id,
+            "location_id": location_id,
+            "customer_id": customer_id,
+            "periods": [
+                {"period": period_id, "forecast": quantity}
+                for period_id, quantity in zip(period_ids, series)
+            ],
+        })
     return {
         "forecast_type": "STATISTICALFORECASTQTY",
         "product_filter": product,
         "location_filter": location,
         "customer_filter": customer,
-            "result_scope": result_scope,
+        "result_scope": result_scope,
+        "period_start_rel": period_start_rel,
+        "period_end_rel": period_end_rel,
         "anomaly_count": len(anomalies),
         "anomalies": anomalies,
+        "forecast_series": forecast_series,
     }
 
-def _find_spikes_and_drops(product_id: str, series: list, sigma_threshold: float) -> list:
+def _find_spikes_and_drops(
+    product_id: str,
+    series: list,
+    sigma_threshold: float,
+    evaluation_start_index: int = 1,
+) -> list:
     """
     Uses a robust z-score (median absolute deviation) rather than mean/stdev.
     A single large spike inflates ordinary stdev enough to mask itself --
@@ -2445,37 +2541,74 @@ def _find_spikes_and_drops(product_id: str, series: list, sigma_threshold: float
     """
     if len(series) < 3:
         return []
-    deltas = [series[i] - series[i - 1] for i in range(1, len(series))]
-    median_delta = statistics.median(deltas)
-    abs_devs = [abs(d - median_delta) for d in deltas]
+    deltas = [
+        series[i] - series[i - 1]
+        if series[i] is not None and series[i - 1] is not None
+        else None
+        for i in range(1, len(series))
+    ]
+    baseline_deltas = [
+        delta for index, delta in enumerate(deltas)
+        if index < evaluation_start_index - 1 and delta is not None
+    ]
+    if len(baseline_deltas) < 2:
+        return []
+    median_delta = statistics.median(baseline_deltas)
+    abs_devs = [abs(delta - median_delta) for delta in baseline_deltas]
     mad = statistics.median(abs_devs)
     if mad == 0:
-        delta_stddev = statistics.pstdev(deltas)
-        if delta_stddev == 0:
-            return []
-        scores = [abs(delta - median_delta) / delta_stddev for delta in deltas]
+        delta_stddev = statistics.pstdev(baseline_deltas)
+        scores = [
+            (abs(delta - median_delta) / delta_stddev if delta_stddev else float("inf"))
+            if delta is not None and delta != median_delta else 0.0 if delta is not None else None
+            for index, delta in enumerate(deltas)
+        ]
     else:
         # 0.6745 scales MAD to be comparable to a standard deviation for normal data
-        scores = [0.6745 * abs(delta - median_delta) / mad for delta in deltas]
+        scores = [
+            0.6745 * abs(delta - median_delta) / mad if delta is not None else None
+            for delta in deltas
+        ]
     found = []
     for i, delta in enumerate(deltas):
-        if scores[i] > sigma_threshold:
+        if (
+            i + 1 >= evaluation_start_index
+            and delta is not None
+            and scores[i] is not None
+            and scores[i] > sigma_threshold
+        ):
             previous_value = series[i]
-            pct_change = (delta / previous_value) * 100 if previous_value else 0
+            pct_change = (delta / abs(previous_value)) * 100 if previous_value else None
             found.append(
                 {
                     "product_id": product_id,
                     "type": "spike" if delta > 0 else "drop",
                     "period_index": i + 1,
-                    "pct_change": round(pct_change, 0),
+                    "pct_change": round(pct_change, 0) if pct_change is not None else None,
                 }
             )
     return found
+
+def _offset_month(period: str, offset: int) -> str:
+    """Return a YYYY-MM period shifted by a number of months."""
+    current = datetime.strptime(period, "%Y-%m")
+    month_index = current.year * 12 + current.month - 1 + offset
+    year, month_index = divmod(month_index, 12)
+    return f"{year:04d}-{month_index + 1:02d}"
+
+def _month_offset(start_period: str, target_period: str) -> int:
+    """Return the relative month offset from start_period to target_period."""
+    start = datetime.strptime(start_period, "%Y-%m")
+    target = datetime.strptime(target_period, "%Y-%m")
+    return (target.year - start.year) * 12 + target.month - start.month
 
 def _find_flatlines(product_id: str, series: list, min_periods: int) -> list:
     found = []
     run_value, run_len, run_start = None, 0, 0
     for i, v in enumerate(series):
+        if v is None:
+            run_value, run_len, run_start = None, 0, i + 1
+            continue
         if v == run_value and v != 0:
             run_len += 1
         else:
@@ -2487,6 +2620,7 @@ def _find_flatlines(product_id: str, series: list, min_periods: int) -> list:
                         "value": run_value,
                         "period_start": run_start,
                         "period_count": run_len,
+                        "description": f"Forecast remained at {run_value:g} for {run_len} consecutive periods.",
                     }
                 )
             run_value, run_len, run_start = v, 1, i
@@ -2498,6 +2632,7 @@ def _find_flatlines(product_id: str, series: list, min_periods: int) -> list:
                 "value": run_value,
                 "period_start": run_start,
                 "period_count": run_len,
+                "description": f"Forecast remained at {run_value:g} for {run_len} consecutive periods.",
             }
         )
     return found

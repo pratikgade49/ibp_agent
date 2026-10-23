@@ -90,6 +90,11 @@ button:focus-visible, textarea:focus-visible { outline: 3px solid rgba(20, 106, 
 .section-heading h3 { margin: 3px 0 0; font: 700 14px/1.3 'Aptos Display', 'Segoe UI Variable', 'Segoe UI', sans-serif; letter-spacing: 0; }
 .row-count { color: #859189; font-size: 10px; white-space: nowrap; }
 .chart-frame { width: 100%; height: 242px; padding: 8px 4px 2px 0; }
+.forecast-heading { align-items: center; }
+.product-picker { display: flex; align-items: center; gap: 8px; color: #748078; font-size: 10px; font-weight: 600; }
+.product-picker select { width: min(210px, 42vw); min-height: 34px; padding: 0 28px 0 9px; border: 1px solid #dce5dd; border-radius: 5px; background: #fff; color: #34443a; font: inherit; font-size: 11px; }
+.forecast-chart { height: 270px; border-bottom: 1px solid #e8ede9; }
+.forecast-evidence .table-scroll { margin-bottom: 13px; }
 .table-scroll { width: 100%; overflow: auto; border-top: 1px solid #e8ede9; }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 11px; }
 th { color: #748078; background: #f8faf8; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; }
@@ -221,6 +226,10 @@ tbody tr:hover { background: #fafcfb; }
   .evidence-badge { font-size: 0; padding: 7px; }
   .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .chart-frame { height: 210px; }
+  .forecast-heading { align-items: flex-start; flex-direction: column; }
+  .product-picker { width: 100%; justify-content: space-between; }
+  .product-picker select { width: min(72%, 240px); }
+  .forecast-chart { height: 225px; }
   .agent-panel { height: min(72vh, 650px); min-height: 470px; position: relative; border-top: 1px solid var(--line); border-left: 0; }
   .agent-header { min-height: 60px; }
   .panel-toggle { display: none; }

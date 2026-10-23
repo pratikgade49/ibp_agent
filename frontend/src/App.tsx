@@ -25,6 +25,8 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -168,6 +170,7 @@ function isUsefulData(data: DataRecord | undefined): data is DataRecord {
     data &&
       (data.master_data_type && Array.isArray(data.results) ||
         Array.isArray(data.results) ||
+        Array.isArray(data.comparison_results) ||
         Array.isArray(data.alert_results) ||
         Array.isArray(data.anomalies) ||
         data.evidence_type === 's4_capacity_bottleneck' ||
@@ -469,9 +472,12 @@ function S4CapacityEvidence({ data }: { data: DataRecord }) {
 }
 
 function Evidence({ data }: { data: DataRecord }) {
+  const [selectedProduct, setSelectedProduct] = useState('');
   const results = asRecords(data.results);
+  const comparisonResults = asRecords(data.comparison_results);
   const alerts = asRecords(data.alert_results);
   const anomalies = asRecords(data.anomalies);
+  const forecastSeries = asRecords(data.forecast_series);
 
   if (data.evidence_type === 's4_capacity_bottleneck') {
     return <S4CapacityBottleneckEvidence data={data} />;
@@ -487,6 +493,151 @@ function Evidence({ data }: { data: DataRecord }) {
 
   if (data.key_figures || data.resource_type && (data.total_rows_evaluated !== undefined || data.tables)) {
     return <CapacityEvidence data={data} />;
+  }
+
+  if (forecastSeries.length > 0) {
+    const activeSeries = forecastSeries.find((series) => String(series.product_id) === selectedProduct)
+      || forecastSeries[0];
+    const productId = String(activeSeries.product_id ?? 'Unknown product');
+    const productAnomalies = anomalies.filter((anomaly) => String(anomaly.product_id) === productId);
+    const anomalyPeriods = new Set(productAnomalies.map((anomaly) => String(anomaly.period)));
+    const periods = asRecords(activeSeries.periods);
+    const chartRows = periods.map((period) => {
+      const label = String(period.period ?? '');
+      const forecast = typeof period.forecast === 'number' ? period.forecast : null;
+      return {
+        period: label,
+        forecast,
+        anomaly: anomalyPeriods.has(label) ? forecast : null,
+      };
+    });
+    const anomalyRows = productAnomalies.map((anomaly) => ({
+      period: anomaly.period,
+      type: anomaly.type,
+      previous_quantity: anomaly.previous_quantity,
+      forecast_quantity: anomaly.forecast_quantity,
+      change_quantity: anomaly.change_quantity,
+      pct_change: anomaly.pct_change == null ? 'Undefined (zero baseline)' : `${formatValue(anomaly.pct_change)}%`,
+      description: anomaly.description,
+    }));
+
+    return (
+      <>
+        <MetricStrip items={[
+          { label: 'Products scanned', value: forecastSeries.length },
+          { label: 'Anomalies detected', value: data.anomaly_count ?? anomalies.length, tone: anomalies.length ? 'alert' : '' },
+          { label: 'Forecast periods', value: periods.length },
+          { label: 'Window', value: `${formatValue(data.period_start_rel)} to ${formatValue(data.period_end_rel)}` },
+        ]} />
+        <section className="evidence-section forecast-evidence">
+          <div className="section-heading forecast-heading">
+            <div><span className="section-kicker">Forecast history and outlook</span><h3>{productId} · statistical forecast</h3></div>
+            <label className="product-picker">
+              <span>Product</span>
+              <select value={productId} onChange={(event) => setSelectedProduct(event.target.value)} aria-label="Select product forecast">
+                {forecastSeries.map((series) => {
+                  const optionProduct = String(series.product_id ?? 'Unknown product');
+                  return <option key={optionProduct} value={optionProduct}>{optionProduct}</option>;
+                })}
+              </select>
+            </label>
+          </div>
+          <div className="chart-frame forecast-chart">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartRows} margin={{ top: 12, right: 12, left: 4, bottom: 4 }}>
+                <CartesianGrid vertical={false} stroke="#e7ebe7" />
+                <XAxis dataKey="period" tickLine={false} axisLine={false} tick={{ fill: '#6d7974', fontSize: 11 }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: '#6d7974', fontSize: 11 }} />
+                <Tooltip formatter={(value, name) => [formatValue(value), name === 'anomaly' ? 'Detected anomaly' : 'Forecast quantity']} />
+                <Line type="monotone" dataKey="forecast" name="Forecast quantity" stroke="#146a57" strokeWidth={2} dot={{ r: 3, fill: '#146a57' }} activeDot={{ r: 5 }} connectNulls={false} />
+                <Line type="monotone" dataKey="anomaly" name="Detected anomaly" stroke="transparent" dot={{ r: 5, fill: '#d66b50', stroke: '#fff', strokeWidth: 2 }} activeDot={{ r: 6 }} connectNulls={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <h4 className="evidence-subheading">Forecast values by period</h4>
+          <DataTable rows={chartRows.map(({ period, forecast }) => ({ period, forecast }))} columns={['period', 'forecast']} />
+          <h4 className="evidence-subheading">Anomaly details</h4>
+          {anomalyRows.length > 0
+            ? <DataTable rows={anomalyRows} columns={['period', 'type', 'previous_quantity', 'forecast_quantity', 'change_quantity', 'pct_change', 'description']} />
+            : <p className="table-empty">No anomalies were detected for this product in the returned periods.</p>}
+        </section>
+      </>
+    );
+  }
+
+  if (comparisonResults.length > 0) {
+    const getSeriesKey = (row: DataRecord) => [row.product, row.location, row.customer]
+      .map((value) => value == null ? '' : String(value))
+      .join('|');
+    const seriesByKey = new Map<string, DataRecord[]>();
+    for (const row of comparisonResults) {
+      const key = getSeriesKey(row);
+      const rows = seriesByKey.get(key) || [];
+      rows.push(row);
+      seriesByKey.set(key, rows);
+    }
+    const seriesKeys = [...seriesByKey.keys()];
+    const activeKey = seriesKeys.includes(selectedProduct) ? selectedProduct : seriesKeys[0];
+    const selectedRows = (seriesByKey.get(activeKey) || [])
+      .sort((left, right) => String(left.period ?? '').localeCompare(String(right.period ?? '')));
+    const firstRow = selectedRows[0] || {};
+    const selectedLabel = [firstRow.product, firstRow.location, firstRow.customer]
+      .filter((value) => value != null && value !== '')
+      .map(String)
+      .join(' · ') || 'Forecast and consumption';
+    const chartRows = selectedRows.map((row) => ({
+      period: String(row.period ?? ''),
+      forecast: typeof row.forecast === 'number' ? row.forecast : null,
+      actual: typeof row.actual === 'number' ? row.actual : null,
+    }));
+    const productCount = new Set(comparisonResults.map((row) => String(row.product ?? ''))).size;
+
+    return (
+      <>
+        <MetricStrip items={[
+          { label: 'Products compared', value: productCount },
+          { label: 'Periods shown', value: selectedRows.length },
+          { label: 'Alerts', value: data.alert_count ?? alerts.length, tone: Number(data.alert_count ?? alerts.length) ? 'alert' : '' },
+          { label: 'Variance threshold', value: `${formatValue(data.threshold_pct)}%` },
+        ]} />
+        <section className="evidence-section forecast-evidence">
+          <div className="section-heading forecast-heading">
+            <div><span className="section-kicker">Demand signal comparison</span><h3>{selectedLabel}</h3></div>
+            {seriesKeys.length > 1 && <label className="product-picker">
+              <span>Product / series</span>
+              <select value={activeKey} onChange={(event) => setSelectedProduct(event.target.value)} aria-label="Select forecast consumption series">
+                {seriesKeys.map((key) => {
+                  const sample = seriesByKey.get(key)?.[0] || {};
+                  const label = [sample.product, sample.location, sample.customer]
+                    .filter((value) => value != null && value !== '')
+                    .map(String)
+                    .join(' · ');
+                  return <option key={key} value={key}>{label}</option>;
+                })}
+              </select>
+            </label>}
+          </div>
+          <div className="chart-frame forecast-chart">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartRows} margin={{ top: 12, right: 12, left: 4, bottom: 4 }}>
+                <CartesianGrid vertical={false} stroke="#e7ebe7" />
+                <XAxis dataKey="period" tickLine={false} axisLine={false} tick={{ fill: '#6d7974', fontSize: 11 }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: '#6d7974', fontSize: 11 }} />
+                <Tooltip formatter={(value, name) => [formatValue(value), name === 'actual' ? 'Consumption' : 'Forecast']} />
+                <Line type="monotone" dataKey="forecast" name="Forecast" stroke="#146a57" strokeWidth={2} dot={{ r: 3, fill: '#146a57' }} activeDot={{ r: 5 }} connectNulls={false} />
+                <Line type="monotone" dataKey="actual" name="Consumption" stroke="#d66b50" strokeWidth={2} dot={{ r: 3, fill: '#d66b50' }} activeDot={{ r: 5 }} connectNulls={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <h4 className="evidence-subheading">Forecast and consumption by period</h4>
+          <DataTable rows={chartRows} columns={['period', 'forecast', 'actual']} />
+          {alerts.length > 0 && <>
+            <h4 className="evidence-subheading">Periods above the variance threshold</h4>
+            <DataTable rows={alerts} />
+          </>}
+        </section>
+      </>
+    );
   }
 
   if (results.length) {
