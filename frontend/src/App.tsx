@@ -13,6 +13,7 @@ import {
   Clock3,
   Database,
   Factory,
+  Layers3,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -34,6 +35,7 @@ import {
 } from 'recharts';
 import type { AskResponse, ChatMessage, Conversation, DataRecord, Insight } from './types';
 import SalesAssurance from './SalesAssurance';
+import ScenarioTestAgent from './ScenarioTestAgent';
 
 const STORAGE_KEY = 'ibp-demand-desk-conversations-v1';
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -45,7 +47,7 @@ const PROMPTS = [
 ];
 
 const AGENTS: Array<{
-  id: 'ibp' | 's4' | 'sales';
+  id: 'ibp' | 's4' | 'sales' | 'scenario';
   index: string;
   name: string;
   descriptor: string;
@@ -65,8 +67,18 @@ const AGENTS: Array<{
     tone: 'blue',
   },
   {
-    id: 's4',
+    id: 'scenario',
     index: '02',
+    name: 'IBP Scenario Test Agent',
+    descriptor: 'Customer base forecast',
+    description: 'Prepare and review customer-base forecasts against a selected IBP scenario before import.',
+    capabilities: ['Scenario-specific inputs', 'Forecast preview', 'Approval-gated import'],
+    icon: Layers3,
+    tone: 'teal',
+  },
+  {
+    id: 's4',
+    index: '03',
     name: 'S/4 Capacity Reader',
     descriptor: 'Capacity & constraints',
     description: 'Read work-center setup, evaluate daily capacity, and identify overloaded resources using SAP data.',
@@ -76,7 +88,7 @@ const AGENTS: Array<{
   },
   {
     id: 'sales',
-    index: '03',
+    index: '04',
     name: 'Commercial Assurance',
     descriptor: 'Order risk decisions',
     description: 'Understand delivery exposure, compare supply options, and prepare commercial decisions for review.',
@@ -719,7 +731,7 @@ function formatDate(value: string): string {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales'>('ibp');
+  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales' | 'scenario'>('ibp');
   const [showAgentDirectory, setShowAgentDirectory] = useState(true);
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
@@ -766,7 +778,7 @@ export default function App() {
     setHistoryCollapsed((collapsed) => !collapsed);
   }
 
-  function selectAgentMode(mode: 'ibp' | 's4' | 'sales') {
+  function selectAgentMode(mode: 'ibp' | 's4' | 'sales' | 'scenario') {
     if (mode === agentMode) return;
     setAgentMode(mode);
     if (activeConversation && (activeConversation.agentMode || 'ibp') !== mode) {
@@ -775,7 +787,7 @@ export default function App() {
     setError('');
   }
 
-  function openAgent(mode: 'ibp' | 's4' | 'sales') {
+  function openAgent(mode: 'ibp' | 's4' | 'sales' | 'scenario') {
     selectAgentMode(mode);
     setShowAgentDirectory(false);
     setHistoryOpen(false);
@@ -802,7 +814,13 @@ export default function App() {
     saveConversation(optimistic);
 
     try {
-      const endpoint = selectedMode === 's4' ? '/s4/ask' : selectedMode === 'sales' ? '/sales/ask' : '/ask';
+      const endpoint = selectedMode === 'scenario'
+        ? '/customer-base/ask'
+        : selectedMode === 's4'
+          ? '/s4/ask'
+          : selectedMode === 'sales'
+            ? '/sales/ask'
+            : '/ask';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -868,7 +886,7 @@ export default function App() {
             <div>
               <span className="directory-kicker"><span /> AGENT WORKSPACES <i /> SAP CONNECTED</span>
               <h1>Choose your<br /><span>planning perspective.</span></h1>
-              <p>Three specialist agents. One connected planning workspace.</p>
+              <p>Four specialist agents. One connected planning workspace.</p>
             </div>
             <div className="directory-network" aria-hidden="true">
               <div className="network-core"><Sparkles size={22} /></div>
@@ -919,6 +937,18 @@ export default function App() {
         onAsk={(value) => void submitQuestion(value)}
         onNewConversation={startNewConversation}
         onSelectMode={selectAgentMode}
+        onShowAgents={() => setShowAgentDirectory(true)}
+      />
+    );
+  }
+  if (agentMode === 'scenario') {
+    return (
+      <ScenarioTestAgent
+        messages={messages}
+        loading={loading}
+        error={error}
+        onAsk={(value) => void submitQuestion(value)}
+        onNewConversation={startNewConversation}
         onShowAgents={() => setShowAgentDirectory(true)}
       />
     );

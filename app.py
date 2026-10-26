@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from agent.graph import run_agent_with_data
 from agent.s4_capacity_graph import run_s4_agent_with_data
 from agent.sales_assurance import run_sales_assurance_with_data
+from customer_base_agent.graph import run_customer_base_agent
 app = FastAPI(title="IBP Demand Planning Agent")
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -35,6 +36,7 @@ class AskResponse(BaseModel):
 CONVERSATIONS: dict[str, list[dict]] = {}
 S4_CONVERSATIONS: dict[str, list[dict]] = {}
 SALES_CONVERSATIONS: dict[str, list[dict]] = {}
+CUSTOMER_BASE_CONVERSATIONS: dict[str, list[dict]] = {}
 
 @app.get("/", include_in_schema=False)
 def home():
@@ -72,6 +74,21 @@ def ask_sales(req: AskRequest):
    history = SALES_CONVERSATIONS.get(conversation_id, [])
    result = run_sales_assurance_with_data(req.message, history=history)
    SALES_CONVERSATIONS[conversation_id] = history + [
+      {"role": "user", "content": req.message},
+      {"role": "assistant", "content": [{"type": "text", "text": result["reply"]}]},
+   ]
+   return AskResponse(**result, conversation_id=conversation_id)
+
+@app.post("/customer-base/ask", response_model=AskResponse)
+def ask_customer_base(req: AskRequest):
+   conversation_id = req.conversation_id or str(uuid.uuid4())
+   history = CUSTOMER_BASE_CONVERSATIONS.get(conversation_id, [])
+   result = run_customer_base_agent(
+      req.message,
+      requester=f"scenario-test:{conversation_id}",
+      history=history,
+   )
+   CUSTOMER_BASE_CONVERSATIONS[conversation_id] = history + [
       {"role": "user", "content": req.message},
       {"role": "assistant", "content": [{"type": "text", "text": result["reply"]}]},
    ]
