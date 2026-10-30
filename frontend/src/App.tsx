@@ -20,6 +20,7 @@ import {
   Send,
   ShieldCheck,
   Sparkles,
+  Wrench,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -47,7 +48,7 @@ const PROMPTS = [
 ];
 
 const AGENTS: Array<{
-  id: 'ibp' | 's4' | 'sales' | 'scenario';
+  id: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario';
   index: string;
   name: string;
   descriptor: string;
@@ -85,6 +86,16 @@ const AGENTS: Array<{
     capabilities: ['Daily load evaluation', 'Work-center shifts', 'Bottleneck evidence'],
     icon: Factory,
     tone: 'teal',
+  },
+  {
+    id: 'maintenance',
+    index: '03',
+    name: 'S/4 Maintenance Planner',
+    descriptor: 'Maintenance windows',
+    description: 'Inspect scheduled maintenance calls and the production work centers they affect.',
+    capabilities: ['Scheduled calls', 'Work-center links', 'Order intervals'],
+    icon: Wrench,
+    tone: 'maintenance',
   },
   {
     id: 'sales',
@@ -186,6 +197,7 @@ function isUsefulData(data: DataRecord | undefined): data is DataRecord {
         Array.isArray(data.alert_results) ||
         Array.isArray(data.anomalies) ||
         data.evidence_type === 's4_capacity_bottleneck' ||
+        data.evidence_type === 's4_maintenance_schedule' ||
         Array.isArray(data.capacity_evaluations) ||
         typeof data.ready === 'boolean' ||
         data.key_figures),
@@ -483,6 +495,41 @@ function S4CapacityEvidence({ data }: { data: DataRecord }) {
   );
 }
 
+function S4MaintenanceEvidence({ data }: { data: DataRecord }) {
+  const maintenanceCalls = asRecords(data.maintenance_calls);
+  const rows = maintenanceCalls.map((call) => ({
+    'Scheduled start': call.scheduled_start_date ?? call.planned_date ?? 'Not provided',
+    'Scheduled end': call.scheduled_end_date ?? 'Not provided',
+    'Maintenance plant': call.maintenance_plant ?? 'Not provided',
+    'Production work center': call.production_work_center ?? 'Unlinked',
+    'Maintenance order': call.maintenance_order ?? '-',
+    'Maintenance item': call.maintenance_item ?? '-',
+    Status: call.scheduling_status_text ?? call.scheduling_status ?? 'Not provided',
+    Completed: call.completed === true ? 'Yes' : 'No',
+  }));
+
+  return (
+    <>
+      <MetricStrip items={[
+        { label: 'Calls returned', value: data.maintenance_count ?? maintenanceCalls.length },
+        { label: 'Unlinked work centers', value: data.unlinked_item_count ?? 0 },
+        { label: 'Capacity impact', value: 'Not evaluated' },
+      ]} />
+      <section className="evidence-section">
+        <div className="section-heading">
+          <div><span className="section-kicker">Scheduled maintenance</span><h3>Maintenance calls by production work center</h3></div>
+          <span className="row-count">{maintenanceCalls.length} calls</span>
+        </div>
+        <DataTable rows={rows} columns={[
+          'Scheduled start', 'Scheduled end', 'Maintenance plant', 'Production work center',
+          'Maintenance order', 'Maintenance item', 'Status', 'Completed',
+        ]} />
+        <p className="capacity-empty">Scheduled maintenance is source evidence; this view does not calculate capacity loss.</p>
+      </section>
+    </>
+  );
+}
+
 function Evidence({ data }: { data: DataRecord }) {
   const [selectedProduct, setSelectedProduct] = useState('');
   const results = asRecords(data.results);
@@ -493,6 +540,10 @@ function Evidence({ data }: { data: DataRecord }) {
 
   if (data.evidence_type === 's4_capacity_bottleneck') {
     return <S4CapacityBottleneckEvidence data={data} />;
+  }
+
+  if (data.evidence_type === 's4_maintenance_schedule') {
+    return <S4MaintenanceEvidence data={data} />;
   }
 
   if (Array.isArray(data.capacity_evaluations)) {
@@ -731,7 +782,7 @@ function formatDate(value: string): string {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales' | 'scenario'>('ibp');
+  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales' |'maintenance' | 'scenario'>('ibp');
   const [showAgentDirectory, setShowAgentDirectory] = useState(true);
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
@@ -743,6 +794,11 @@ export default function App() {
   const activeConversation = conversations.find((conversation) => conversation.id === activeId);
   const messages = activeConversation?.messages || EMPTY_MESSAGES;
   const dashboardData = latestInsight(messages);
+  const chatAgentName = agentMode === 's4'
+    ? 'S/4 Capacity Reader'
+    : agentMode === 'maintenance'
+      ? 'S/4 Maintenance Planner'
+      : 'IBP Demand Planning Agent';
 
   useEffect(() => {
     try {
@@ -778,7 +834,7 @@ export default function App() {
     setHistoryCollapsed((collapsed) => !collapsed);
   }
 
-  function selectAgentMode(mode: 'ibp' | 's4' | 'sales' | 'scenario') {
+  function selectAgentMode(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario') {
     if (mode === agentMode) return;
     setAgentMode(mode);
     if (activeConversation && (activeConversation.agentMode || 'ibp') !== mode) {
@@ -787,7 +843,7 @@ export default function App() {
     setError('');
   }
 
-  function openAgent(mode: 'ibp' | 's4' | 'sales' | 'scenario') {
+  function openAgent(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario') {
     selectAgentMode(mode);
     setShowAgentDirectory(false);
     setHistoryOpen(false);
@@ -820,7 +876,9 @@ export default function App() {
           ? '/s4/ask'
           : selectedMode === 'sales'
             ? '/sales/ask'
-            : '/ask';
+            : selectedMode === 'maintenance'
+              ? '/maintenance/ask'
+              : '/ask';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -886,7 +944,7 @@ export default function App() {
             <div>
               <span className="directory-kicker"><span /> AGENT WORKSPACES <i /> SAP CONNECTED</span>
               <h1>Choose your<br /><span>planning perspective.</span></h1>
-              <p>Four specialist agents. One connected planning workspace.</p>
+              <p>Five specialist agents. One connected planning workspace.</p>
             </div>
             <div className="directory-network" aria-hidden="true">
               <div className="network-core"><Sparkles size={22} /></div>
@@ -965,6 +1023,7 @@ export default function App() {
           <button type="button" role="radio" aria-checked={agentMode === 'ibp'} className={agentMode === 'ibp' ? 'selected' : ''} onClick={() => selectAgentMode('ibp')} disabled={loading}>IBP</button>
           <button type="button" role="radio" aria-checked={agentMode === 's4'} className={agentMode === 's4' ? 'selected' : ''} onClick={() => selectAgentMode('s4')} disabled={loading}>S/4 Capacity</button>
           <button type="button" role="radio" aria-checked={salesModeSelected} className={salesModeSelected ? 'selected' : ''} onClick={() => selectAgentMode('sales')} disabled={loading}>Sales</button>
+          <button type="button" role="radio" aria-checked={agentMode === 'maintenance'} className={agentMode === 'maintenance' ? 'selected' : ''} onClick={() => selectAgentMode('maintenance')} disabled={loading}>Maintenance</button>
         </div>
         <div className="topbar-right">
           <button type="button" className="directory-return-button" onClick={() => setShowAgentDirectory(true)}><PanelLeftOpen size={15} /> All agents</button>
@@ -1040,25 +1099,33 @@ export default function App() {
           )}
         </main>
 
-        <aside className="agent-panel" aria-label={`${agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'} chat`}>
+        <aside className="agent-panel" aria-label={`${chatAgentName} chat`}>
           <div className="agent-header">
             <div className="agent-avatar"><img src={jouleLogo} alt="SAP Joule" /></div>
-            <div className="agent-heading"><strong>{agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'}</strong><span><i /> Ready to analyze</span></div>
+            <div className="agent-heading"><strong>{chatAgentName}</strong><span><i /> Ready to analyze</span></div>
           </div>
           <div className="chat-context"><span className="context-line" />{activeConversation ? activeConversation.title : 'New conversation'}</div>
           <div className="message-list" ref={messageListRef} aria-live="polite">
             {messages.length === 0 ? (
               <div className="chat-welcome">
                 <span className="welcome-glyph"><Sparkles size={19} /></span>
-                <h2>{agentMode === 's4' ? 'Read your S/4 capacity setup.' : 'Good planning starts with a clear signal.'}</h2>
-                <p>{agentMode === 's4' ? 'Inspect configured work-center capacity and shift intervals.' : 'Ask about forecasts, anomalies, data readiness, or capacity constraints.'}</p>
+                <h2>{agentMode === 'maintenance' ? 'Review upcoming maintenance windows.' : agentMode === 's4' ? 'Read your S/4 capacity setup.' : 'Good planning starts with a clear signal.'}</h2>
+                <p>{agentMode === 'maintenance' ? 'Inspect scheduled calls, their order intervals, and linked production work centers.' : agentMode === 's4' ? 'Inspect configured work-center capacity and shift intervals.' : 'Ask about forecasts, anomalies, data readiness, or capacity constraints.'}</p>
                 <div className="prompt-list">
-                  {(agentMode === 's4' ? ['Is there a possibility of a capacity bottleneck for any resource from DD/MM/YYYY to DD/MM/YYYY?'] : PROMPTS).map((prompt) => <button key={prompt} onClick={() => void submitQuestion(prompt)} disabled={loading}>{prompt}<ArrowUpRight size={14} /></button>)}
+                  {(agentMode === 'maintenance'
+                    ? [
+                        'Show scheduled maintenance calls in the next 30 days.',
+                        'Which production work centers are affected by upcoming maintenance?',
+                        'Show maintenance calls for work center [work center] between YYYY-MM-DD and YYYY-MM-DD.',
+                      ]
+                    : agentMode === 's4'
+                      ? ['Is there a possibility of a capacity bottleneck for any resource from DD/MM/YYYY to DD/MM/YYYY?']
+                      : PROMPTS).map((prompt) => <button key={prompt} onClick={() => void submitQuestion(prompt)} disabled={loading}>{prompt}<ArrowUpRight size={14} /></button>)}
                 </div>
               </div>
             ) : messages.map((message) => (
               <article className={`message ${message.role}`} key={message.id}>
-                <span className="message-label">{message.role === 'user' ? 'You' : agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'}</span>
+                <span className="message-label">{message.role === 'user' ? 'You' : chatAgentName}</span>
                 {message.role === 'assistant'
                   ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                   : <p>{message.content}</p>}
@@ -1075,14 +1142,14 @@ export default function App() {
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
-                placeholder={agentMode === 's4' ? 'Ask about work-center capacity...' : 'Ask about your plan...'}
+                placeholder={agentMode === 'maintenance' ? 'Ask about scheduled maintenance...' : agentMode === 's4' ? 'Ask about work-center capacity...' : 'Ask about your plan...'}
                 rows={2}
-                aria-label={`Message ${agentMode === 's4' ? 'S/4 Capacity Reader' : 'IBP Demand Planning Agent'}`}
+                aria-label={`Message ${chatAgentName}`}
                 disabled={loading}
               />
               <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
             </form>
-            <p className="privacy-note">{agentMode === 's4' ? 'Read-only S/4 capacity data.' : 'Analysis is based on available planning data.'}</p>
+            <p className="privacy-note">{agentMode === 'maintenance' ? 'Read-only S/4 maintenance schedule data.' : agentMode === 's4' ? 'Read-only S/4 capacity data.' : 'Analysis is based on available planning data.'}</p>
           </div>
         </aside>
       </div>
