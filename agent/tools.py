@@ -641,6 +641,7 @@ def _discover_product_master_data_types(planning_area: str) -> list[str]:
 #   non_negative        [attr, ...]          -> numeric values must be >= 0
 #   ordered             [{"low", "high", "zero_high_means_unset"?}]
 #                                            -> low <= high (numbers or dates)
+#   error_zero          [attr, ...]          -> an exactly-zero value is an error
 #   warn_zero           [attr, ...]          -> a value of exactly 0 is suspicious
 #   location_must_exist_in_locationproduct   -> LOCID must also have a
 #                                               LOCATIONPRODUCT row (warning)
@@ -664,6 +665,7 @@ _DEFAULT_MASTER_DATA_RULES: dict = {
         },
         "SOURCEPRODUCTION": {
             "non_negative": ["PLEADTIME", "PMINLOTSIZE", "PMAXLOTSIZE", "PROUNDING", "PRATIO"],
+            "error_zero": ["PRATIO"],
             "ordered": [
                 {"low": "PMINLOTSIZE", "high": "PMAXLOTSIZE", "zero_high_means_unset": True}
             ],
@@ -814,6 +816,22 @@ def _row_checks(rows, master_data_type, type_rules, mandatory_attrs) -> list[dic
                 findings.append(_make_finding(
                     "error", "NEGATIVE_VALUE",
                     f"{attribute} is negative ({row.get(attribute)}).",
+                    master_data_type, row, index,
+                ))
+        for attribute in type_rules.get("error_zero", []):
+            number = _as_number(row.get(attribute))
+            if number is not None and number == 0:
+                is_production_ratio = attribute == "PRATIO"
+                findings.append(_make_finding(
+                    "error",
+                    "ZERO_PRODUCTION_RATIO" if is_production_ratio else "ZERO_VALUE",
+                    (
+                        "PRATIO is 0; this production source cannot generate production "
+                        "receipts. If this source should produce, set PRATIO to 1 and "
+                        "rerun supply planning."
+                        if is_production_ratio
+                        else f"{attribute} is 0; confirm this value is valid."
+                    ),
                     master_data_type, row, index,
                 ))
         for attribute in type_rules.get("warn_zero", []):
@@ -991,7 +1009,8 @@ def run_product_master_data_health_check(
     if catalog:
         discovered_suffixes = {_suffix_of(t, prefix) for t in master_data_types}
         consistency_rules = sum(
-            len(r.get("non_negative", [])) + len(r.get("ordered", [])) + len(r.get("warn_zero", []))
+            len(r.get("non_negative", [])) + len(r.get("ordered", []))
+            + len(r.get("error_zero", [])) + len(r.get("warn_zero", []))
             for r in rules["types"].values()
         )
 
@@ -1385,6 +1404,106 @@ def _forecast_consumption_rows(
         }
         for row in result.get("d", {}).get("results", [])
     ]
+
+
+_MOCK_PRODUCTION_RECEIPTS = [
+    {
+        "product": "Product A",
+        "location": "1010",
+        "source": "PROD-SOURCE-1",
+        "period_offset": 0,
+        "production": 0.0,
+    }
+]
+
+
+def get_production_receipts_status(
+    product: str,
+    location: str | None = None,
+    period_start_rel: int = 0,
+    period_end_rel: int = 3,
+    version: str | None = None,
+) -> dict:
+    """Read PRODUCTION receipts for a product and report zero vs missing data."""
+    if not product or not product.strip():
+        raise ValueError("product must not be empty")
+    if period_start_rel > period_end_rel:
+        raise ValueError("period_start_rel must not exceed period_end_rel")
+
+    if USE_MOCK_DATA:
+        current_period = datetime.now(timezone.utc).strftime("%Y-%m")
+        rows = [
+            {
+                "product": record["product"],
+                "location": record["location"],
+                "source": record["source"],
+                "period": _offset_month(current_period, record["period_offset"]),
+                "production": record["production"],
+            }
+            for record in _MOCK_PRODUCTION_RECEIPTS
+            if record["product"] == _display_id(product)
+            and (location is None or record["location"] == _display_id(location))
+            and period_start_rel <= record["period_offset"] <= period_end_rel
+        ]
+    else:
+        period_field = f"PERIODID{IBP_PERIOD_LEVEL}_REL"
+        timestamp_field = f"PERIODID{IBP_PERIOD_LEVEL}_TSTAMP"
+        filters = [
+            f"UOMTOID eq '{IBP_UOM_TO_ID}'",
+            f"{period_field} ge {period_start_rel}",
+            f"{period_field} le {period_end_rel}",
+            f"PRDID eq '{_display_id(product)}'",
+        ]
+        if location:
+            filters.append(f"LOCID eq '{_display_id(location)}'")
+        if version:
+            filters.append(f"VersionID eq '{version}'")
+        result = _ibp_get(
+            select=(
+                f"PRDID,LOCID,{CAPACITY_SOURCE_FIELD},{timestamp_field},"
+                f"UOMTOID,PRODUCTION"
+            ),
+            filter_=" and ".join(filters),
+        )
+        rows = []
+        for raw in result.get("d", {}).get("results", []):
+            rows.append({
+                "product": raw.get("PRDID"),
+                "location": raw.get("LOCID"),
+                "source": raw.get(CAPACITY_SOURCE_FIELD),
+                "period": _period_month(raw.get(timestamp_field)),
+                "production": _as_number(raw.get("PRODUCTION")),
+            })
+
+    missing_value_count = sum(row["production"] is None for row in rows)
+    total_production = (
+        sum(row["production"] for row in rows if row["production"] is not None)
+        if rows and not missing_value_count
+        else None
+    )
+    if not rows:
+        status = "no_data"
+    elif missing_value_count:
+        status = "incomplete_data"
+    elif total_production == 0:
+        status = "no_receipts"
+    else:
+        status = "receipts_found"
+
+    return {
+        "key_figure": "PRODUCTION",
+        "status": status,
+        "product_filter": _display_id(product),
+        "location_filter": _display_id(location),
+        "period_start_rel": period_start_rel,
+        "period_end_rel": period_end_rel,
+        "row_count": len(rows),
+        "missing_value_count": missing_value_count,
+        "total_production": round(total_production, 3) if total_production is not None else None,
+        "zero_receipt_rows": [row for row in rows if row["production"] == 0],
+        "rows": rows,
+        "source": "mock" if USE_MOCK_DATA else "live",
+    }
 
 def query_planning_data(
     metric: str = "forecast",

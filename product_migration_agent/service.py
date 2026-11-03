@@ -1,6 +1,7 @@
 """Orchestration: 3 uploaded workbooks in -> converted S/4 workbook + summary out."""
 import io
 import json
+import re
 import threading
 import uuid
 from collections import OrderedDict
@@ -18,6 +19,28 @@ from .value_maps import decide_value_maps
 MAPPING_COLS = ["Oracle Field", "SAP Table", "SAP Field", "SAP Description", "SAP Data Type", "SAP Length", "Mandatory in S4"]
 RULES_COLS = ["SAP Field", "SAP Description", "Mandatory", "Data List", "Flag if"]
 _cache_lock = threading.Lock()
+
+
+def _apply_manual_corrections(df: pd.DataFrame, correction_text: str | None) -> tuple[pd.DataFrame, list[str]]:
+    if not correction_text:
+        return df, []
+    text = correction_text.strip()
+    if not text:
+        return df, []
+
+    updates: list[str] = []
+    field_value_re = re.compile(r"(?:set|change|update|replace)\s+([A-Za-z0-9_]+)\s*(?:=|:|to)\s*['\"]?([^'\"\n]+?)['\"]?\s*(?:$|\b(?:and|then|for|;))", re.IGNORECASE)
+    inline_re = re.compile(r"([A-Za-z0-9_]+)\s*(?:=|:)\s*['\"]?([^'\"\n]+?)['\"]?", re.IGNORECASE)
+    for pattern in (field_value_re, inline_re):
+        for match in pattern.finditer(text):
+            field = match.group(1).strip()
+            value = match.group(2).strip().rstrip(".")
+            if field in df.columns and value:
+                df[field] = value
+                updates.append(f"{field}={value}")
+    if not updates and re.search(r"ignore|suppress|clear.*warning|warning", text, re.IGNORECASE):
+        return df, ["warning_ignored_by_user"]
+    return df, updates
 
 
 class _LazyLLM:
@@ -84,7 +107,7 @@ def _style(ws):
 
 
 def convert_files(data: bytes, mapping: bytes, rules: bytes, min_conf: float | None = None,
-                  llm=None, manual_maps: dict | None = None) -> ConversionResult:
+                  llm=None, manual_maps: dict | None = None, correction_text: str | None = None) -> ConversionResult:
     min_conf = config.DEFAULT_MIN_CONF if min_conf is None else min_conf
     if not 0 <= min_conf <= 1:
         raise ValueError("min_confidence must be between 0 and 1.")
@@ -98,6 +121,8 @@ def convert_files(data: bytes, mapping: bytes, rules: bytes, min_conf: float | N
     with _cache_lock:
         _save_cache(cache)
     tables, issues, changes, converted_sap = convert(src, mp, entries, maps)
+    if correction_text:
+        converted_sap, _ = _apply_manual_corrections(converted_sap, correction_text)
 
     bad = set(issues.loc[issues["severity"] == "ERROR", "MATNR"]) if len(issues) else set()
     ids = tables[next(iter(tables))]["MATNR"]
@@ -123,12 +148,14 @@ def convert_files(data: bytes, mapping: bytes, rules: bytes, min_conf: float | N
         if field in converted_sap.columns:
             converted[field] = converted_sap[field].tolist()
 
+    preview = [{str(k): "" if pd.isna(v) else str(v) for k, v in row.items()} for row in converted.head(10).to_dict(orient="records")]
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         converted.to_excel(w, sheet_name="CONVERTED_DATA", index=False)
         ws = w.book["CONVERTED_DATA"]
         _style(ws)
-    return ConversionResult(buf.getvalue(), summary, human)
+    return ConversionResult(buf.getvalue(), {**summary, "preview": preview}, human)
 
 
 class JobStore:

@@ -103,6 +103,10 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("DISMM", [h["field"] for h in res.human_needed if h["type"] == "rule"])
         self.assertEqual(list(self.sheets(res)["CONVERTED_DATA"]["DISMM"]), ["PD", "PD", "PD"])
 
+    def test_manual_correction_updates_exported_data(self):
+        res = convert_files(*inputs(), llm=FakeLLM(), correction_text="set BESKZ to E")
+        self.assertEqual(list(self.sheets(res)["CONVERTED_DATA"]["BESKZ"]), ["E", "E", "E"])
+
     def test_second_run_uses_cache(self):
         llm = FakeLLM()
         convert_files(*inputs(), llm=llm)

@@ -16,6 +16,7 @@ from langgraph.graph.message import add_messages
 from agent.llm import get_llm_client
 from agent.tools import (
     analyze_capacity_bottlenecks,
+    get_production_receipts_status,
     recommend_capacity_action,
     update_capacity_supply,
     update_adjusted_production,
@@ -34,7 +35,7 @@ from agent.tools import (
 SYSTEM_PROMPT = """You are the IBP Demand Planning Agent. You help demand \
 planners validate data, monitor consumption variance, detect forecast \
 anomalies, and run master-data health checks in SAP Integrated Business Planning.
-You have fifteen tools available. Decide which tool(s) to call and in what \
+You have sixteen tools available. Decide which tool(s) to call and in what \
 order based on the planner's request -- do not guess numbers yourself, \
 always call the relevant tool to get real data first.
 For master-data health checks, use run_product_master_data_health_check when \
@@ -45,6 +46,16 @@ Use run_master_data_health_check only when the user explicitly supplies a \
 master-data type. Both tools are read-only and return normalized errors and \
 warnings. Do not claim that a health check passed unless the returned status is \
 completed and the error_count is zero.
+For questions about missing production receipts for an individual product, call \
+get_production_receipts_status for the requested product, location, and horizon, \
+then call run_product_master_data_health_check. Report PRODUCTION receipts \
+separately from source master-data findings. Treat no_data as unavailable evidence, \
+not proof that PRODUCTION is zero. Inspect ZJPSOURCEPRODUCTION and \
+ZJPSOURCELOCATION results when present. A PRATIO value of 0 in a production \
+source is a blocking finding for production receipts; report the affected source \
+record and recommend setting PRATIO to 1 only when that source is intended to \
+produce, then rerunning supply planning. Do not treat a zero TRATIO in a \
+location source as a production-ratio finding.
 For questions asking whether a product is ready for Demand Planning, always \
 call check_product_demand_planning_readiness. It checks both product master data \
 and ACTUALSQTY availability for the target period. Do not answer readiness from \
@@ -151,6 +162,7 @@ imply that a recommendation has been executed; follow confirmation rules before 
 """
 TOOL_REGISTRY = {
     "analyze_capacity_bottlenecks": analyze_capacity_bottlenecks,
+    "get_production_receipts_status": get_production_receipts_status,
     "recommend_capacity_action": recommend_capacity_action,
     "update_capacity_supply": update_capacity_supply,
     "update_adjusted_production": update_adjusted_production,
@@ -167,6 +179,21 @@ TOOL_REGISTRY = {
     "check_product_demand_planning_readiness": check_product_demand_planning_readiness,
     }
 TOOL_SCHEMAS = [
+   {
+       "name": "get_production_receipts_status",
+       "description": "Read SAP IBP key figure PRODUCTION for a product over a relative-period horizon, optionally filtered by location. Distinguishes nonzero receipts, explicit zero rows, missing PRODUCTION values, and no returned data. Read-only; use for missing production receipt investigations before diagnosing source master data.",
+       "input_schema": {
+           "type": "object",
+           "properties": {
+               "product": {"type": "string", "description": "Product ID"},
+               "location": {"type": "string", "description": "Optional location ID"},
+               "period_start_rel": {"type": "integer", "description": "Relative period start; defaults to current period (0)"},
+               "period_end_rel": {"type": "integer", "description": "Relative period end; defaults to three periods ahead (3)"},
+               "version": {"type": "string", "description": "Optional IBP version ID"},
+           },
+           "required": ["product"],
+       },
+   },
    {
        "name": "check_product_demand_planning_readiness",
        "description": "Check whether a product is ready for Demand Planning by combining all related product master-data checks with ACTUALSQTY availability for the target period. Use this for product readiness questions; do not substitute a master-data-only check. Returns overall_status, master_data_ready, actual_quantity_ready, detailed master_data findings, and actual_quantity history status.",

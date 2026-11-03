@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react';
-import { ArrowLeft, Download, FileSpreadsheet, Loader2, Upload } from 'lucide-react';
+import { ArrowLeft, Download, FileSpreadsheet, Loader2, MessageSquareText, Send, Upload } from 'lucide-react';
 import './product-migration.css';
 
 interface Summary {
@@ -20,11 +20,22 @@ interface HumanItem {
   detail: string;
 }
 
+interface PreviewRow {
+  [key: string]: string;
+}
+
 interface ConvertResponse {
   job_id: string;
   summary: Summary;
   human_needed: HumanItem[];
   download_url: string;
+  preview: PreviewRow[];
+}
+
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
 }
 
 interface ProductMigrationProps {
@@ -44,27 +55,59 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<ConvertResponse | null>(null);
+  const [correction, setCorrection] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { id: 'welcome', role: 'assistant', text: 'Upload the input files and I will convert them. If you want to override warnings, type a correction like “set BESKZ to E”.' },
+  ]);
   const ready = SLOTS.every((slot) => files[slot.key]);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function buildBody(extra?: { key: string; value: string | File }) {
+    const body = new FormData();
+    SLOTS.forEach((slot) => body.append(slot.key, files[slot.key] as File));
+    if (extra) body.append(extra.key, extra.value);
+    return body;
+  }
+
+  async function runConversion(correctionText?: string) {
     if (!ready || loading) return;
     setLoading(true);
     setError('');
-    setResult(null);
+    const requestBody = buildBody(correctionText ? { key: 'correction', value: correctionText } : undefined);
     try {
-      const body = new FormData();
-      SLOTS.forEach((slot) => body.append(slot.key, files[slot.key] as File));
-      const response = await fetch('/migration/convert', { method: 'POST', body });
+      const response = await fetch('/migration/convert', { method: 'POST', body: requestBody });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `Conversion failed (${response.status}).`);
-      setResult(payload as ConvertResponse);
+      const parsed = payload as ConvertResponse;
+      setResult(parsed);
+      setMessages((current) => [...current, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        text: correctionText ? `Applied: “${correctionText}”. Updated workbook is ready.` : 'Conversion finished. Review the preview and download the Excel file.',
+      }]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Conversion failed.');
     } finally {
       setLoading(false);
     }
   }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!ready || loading) return;
+    setResult(null);
+    setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', text: 'Run migration with the selected files.' }]);
+    await runConversion();
+  }
+
+  async function applyCorrection() {
+    const value = correction.trim();
+    if (!value || !ready || loading) return;
+    setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', text: value }]);
+    setCorrection('');
+    await runConversion(value);
+  }
+
+  const columns = result?.preview?.[0] ? Object.keys(result.preview[0]) : [];
 
   return (
     <main className="pm-shell">
@@ -76,7 +119,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
 
       <section className="pm-layout">
         <h1>Convert Oracle product master to S/4HANA.</h1>
-        <p className="pm-lede">Upload the data, mapping and rules. The agent interprets the rules, translates codes, applies the changes and returns an Excel file. You only review what it is not confident about.</p>
+        <p className="pm-lede">Upload the data, mapping and rules. After the workbook is generated, you can correct warnings in the chat and regenerate the updated Excel immediately.</p>
 
         <form className="pm-form" onSubmit={submit}>
           {SLOTS.map((slot) => (
@@ -105,21 +148,68 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
               <div className={result.summary.with_errors ? 'warn' : ''}><b>{result.summary.with_errors}</b><span>With errors</span></div>
               <div><b>{result.summary.changes_applied}</b><span>Changes applied</span></div>
             </div>
-            <a className="pm-download" href={result.download_url} download><Download size={16} /> Download Excel</a>
 
-            {result.human_needed.length > 0 ? (
-              <div className="pm-human">
-                <h2>Needs your decision ({result.human_needed.length})</h2>
-                <ul>{result.human_needed.map((item, index) => (
-                  <li key={`${item.field}-${index}`}><code>{item.field}</code> <em>{item.type.replace('_', ' ')}</em> {item.detail}</li>
-                ))}</ul>
+            <div className="pm-content-grid">
+              <div className="pm-panel">
+                <a className="pm-download" href={result.download_url} download><Download size={16} /> Download Excel</a>
+
+                {result.human_needed.length > 0 ? (
+                  <div className="pm-human">
+                    <h2>Needs your decision ({result.human_needed.length})</h2>
+                    <ul>{result.human_needed.map((item, index) => (
+                      <li key={`${item.field}-${index}`}><code>{item.field}</code> <em>{item.type.replace('_', ' ')}</em> {item.detail}</li>
+                    ))}</ul>
+                  </div>
+                ) : <p className="pm-ok">The agent resolved everything on its own.</p>}
+
+                {result.summary.warnings.length > 0 && (
+                  <div className="pm-human"><h2>Input warnings</h2><ul>{result.summary.warnings.map((w) => <li key={w}>{w}</li>)}</ul></div>
+                )}
+
+                <div className="pm-preview">
+                  <div className="pm-preview-header"><MessageSquareText size={16} /> Excel preview</div>
+                  {result.preview?.length ? (
+                    <div className="pm-table-wrap">
+                      <table>
+                        <thead>
+                          <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
+                        </thead>
+                        <tbody>
+                          {result.preview.map((row, index) => (
+                            <tr key={`${index}-${Object.values(row).join('-')}`}>
+                              {columns.map((column) => <td key={`${column}-${index}`}>{row[column] ?? ''}</td>)}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : <p className="pm-note">Preview is not available for this result.</p>}
+                </div>
               </div>
-            ) : <p className="pm-ok">The agent resolved everything on its own.</p>}
 
-            {result.summary.warnings.length > 0 && (
-              <div className="pm-human"><h2>Input warnings</h2><ul>{result.summary.warnings.map((w) => <li key={w}>{w}</li>)}</ul></div>
-            )}
-            <p className="pm-note">The Excel file lists every AI decision with its confidence, plus a change log and per-record issues.</p>
+              <aside className="pm-chat-panel">
+                <div className="pm-chat-header">Correction chat</div>
+                <div className="pm-chat-body">
+                  {messages.map((message) => (
+                    <div key={message.id} className={`pm-chat-message ${message.role}`}>
+                      <span>{message.role === 'user' ? 'You' : 'Agent'}</span>
+                      <p>{message.text}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="pm-chat-composer">
+                  <textarea
+                    value={correction}
+                    onChange={(e) => setCorrection(e.target.value)}
+                    placeholder="Example: set BESKZ to E or set DISMM to PD"
+                    rows={3}
+                  />
+                  <button type="button" className="pm-run" onClick={() => void applyCorrection()} disabled={loading || !correction.trim()}>
+                    <Send size={15} /> Apply
+                  </button>
+                </div>
+              </aside>
+            </div>
           </section>
         )}
       </section>

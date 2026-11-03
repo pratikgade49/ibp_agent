@@ -20,18 +20,21 @@ async def convert_endpoint(
     mapping: UploadFile = File(...),
     rules: UploadFile = File(...),
     min_confidence: float | None = Form(None),
+    correction: str | None = Form(None),
 ):
     blobs = [await f.read(config.MAX_UPLOAD_BYTES + 1) for f in (data, mapping, rules)]
     try:
-        result = await run_in_threadpool(convert_files, blobs[0], blobs[1], blobs[2], min_confidence)
+        result = await run_in_threadpool(convert_files, blobs[0], blobs[1], blobs[2], min_confidence, None, None, correction)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001 - typically an LLM/provider failure
         log.exception("product migration failed")
         raise HTTPException(status_code=502, detail=f"Conversion failed: {e}") from e
     job_id = JOBS.put(result.workbook)
-    return {"job_id": job_id, "summary": result.summary, "human_needed": result.human_needed,
-            "download_url": f"/migration/download/{job_id}"}
+    summary = dict(result.summary)
+    preview = summary.pop("preview", [])
+    return {"job_id": job_id, "summary": summary, "human_needed": result.human_needed,
+            "download_url": f"/migration/download/{job_id}", "preview": preview}
 
 
 @router.get("/download/{job_id}")
