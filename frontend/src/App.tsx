@@ -36,7 +36,6 @@ import {
   YAxis,
 } from 'recharts';
 import type { AskResponse, ChatMessage, Conversation, DataRecord, Insight } from './types';
-import SalesAssurance from './SalesAssurance';
 import ScenarioTestAgent from './ScenarioTestAgent';
 import ProductMigration from './ProductMigration';
 
@@ -50,7 +49,7 @@ const PROMPTS = [
 ];
 
 const AGENTS: Array<{
-  id: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration';
+  id: 'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration';
   index: string;
   name: string;
   descriptor: string;
@@ -100,18 +99,8 @@ const AGENTS: Array<{
     tone: 'maintenance',
   },
   {
-    id: 'sales',
-    index: '04',
-    name: 'Commercial Assurance',
-    descriptor: 'Order risk decisions',
-    description: 'Understand delivery exposure, compare supply options, and prepare commercial decisions for review.',
-    capabilities: ['Order exposure', 'Supply alternatives', 'Decision support'],
-    icon: ShieldCheck,
-    tone: 'coral',
-  },
-  {
     id: 'migration',
-    index: '05',
+    index: '04',
     name: 'Product Master Migration',
     descriptor: 'Oracle to S/4HANA conversion',
     description: 'Upload data, mapping and rules; the agent interprets the rules, translates codes and returns the converted Excel.',
@@ -794,7 +783,7 @@ function formatDate(value: string): string {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration'>('ibp');
+  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration'>('ibp');
   const [showAgentDirectory, setShowAgentDirectory] = useState(true);
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
@@ -846,7 +835,7 @@ export default function App() {
     setHistoryCollapsed((collapsed) => !collapsed);
   }
 
-  function selectAgentMode(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration') {
+  function selectAgentMode(mode: 'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration') {
     if (mode === agentMode) return;
     setAgentMode(mode);
     if (activeConversation && (activeConversation.agentMode || 'ibp') !== mode) {
@@ -855,7 +844,7 @@ export default function App() {
     setError('');
   }
 
-  function openAgent(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration') {
+  function openAgent(mode: 'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration') {
     selectAgentMode(mode);
     setShowAgentDirectory(false);
     setHistoryOpen(false);
@@ -886,11 +875,9 @@ export default function App() {
         ? '/customer-base/ask'
         : selectedMode === 's4'
           ? '/s4/ask'
-          : selectedMode === 'sales'
-            ? '/sales/ask'
-            : selectedMode === 'maintenance'
-              ? '/maintenance/ask'
-              : '/ask';
+          : selectedMode === 'maintenance'
+            ? '/maintenance/ask'
+            : '/ask';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -997,20 +984,6 @@ export default function App() {
     );
   }
 
-  if (agentMode === 'sales') {
-    return (
-      <SalesAssurance
-        data={activeConversation?.agentMode === 'sales' ? dashboardData : null}
-        messages={messages}
-        loading={loading}
-        error={error}
-        onAsk={(value) => void submitQuestion(value)}
-        onNewConversation={startNewConversation}
-        onSelectMode={selectAgentMode}
-        onShowAgents={() => setShowAgentDirectory(true)}
-      />
-    );
-  }
   if (agentMode === 'migration') {
     return <ProductMigration onShowAgents={() => setShowAgentDirectory(true)} />;
   }
@@ -1026,7 +999,6 @@ export default function App() {
       />
     );
   }
-  const salesModeSelected = (agentMode as string) === 'sales';
   return (
     <div className={`app-frame ${historyOpen ? 'history-open' : ''} ${historyCollapsed ? 'history-collapsed' : ''}`}>
       <header className="topbar">
@@ -1037,7 +1009,6 @@ export default function App() {
         <div className="topbar-agent-switch" role="radiogroup" aria-label="Choose planning agent">
           <button type="button" role="radio" aria-checked={agentMode === 'ibp'} className={agentMode === 'ibp' ? 'selected' : ''} onClick={() => selectAgentMode('ibp')} disabled={loading}>IBP</button>
           <button type="button" role="radio" aria-checked={agentMode === 's4'} className={agentMode === 's4' ? 'selected' : ''} onClick={() => selectAgentMode('s4')} disabled={loading}>S/4 Capacity</button>
-          <button type="button" role="radio" aria-checked={salesModeSelected} className={salesModeSelected ? 'selected' : ''} onClick={() => selectAgentMode('sales')} disabled={loading}>Sales</button>
           <button type="button" role="radio" aria-checked={agentMode === 'maintenance'} className={agentMode === 'maintenance' ? 'selected' : ''} onClick={() => selectAgentMode('maintenance')} disabled={loading}>Maintenance</button>
         </div>
         <div className="topbar-right">

@@ -12,7 +12,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from agent.graph import run_agent_with_data
 from agent.s4_capacity_graph import run_s4_agent_with_data
-from agent.sales_assurance import run_sales_assurance_with_data
 from agent.maintenance_graph import run_maintenance_agent_with_data
 from customer_base_agent.graph import run_customer_base_agent
 from product_migration_agent.api import router as migration_router
@@ -39,7 +38,6 @@ class AskResponse(BaseModel):
 # across restarts or multiple Cloud Foundry instances.
 CONVERSATIONS: dict[str, list[dict]] = {}
 S4_CONVERSATIONS: dict[str, list[dict]] = {}
-SALES_CONVERSATIONS: dict[str, list[dict]] = {}
 MAINTENANCE_CONVERSATIONS: dict[str, list[dict]] = {}
 CUSTOMER_BASE_CONVERSATIONS: dict[str, list[dict]] = {}
 
@@ -68,17 +66,6 @@ def ask_s4(req: AskRequest):
    history = S4_CONVERSATIONS.get(conversation_id, [])
    result = run_s4_agent_with_data(req.message, history=history)
    S4_CONVERSATIONS[conversation_id] = history + [
-      {"role": "user", "content": req.message},
-      {"role": "assistant", "content": [{"type": "text", "text": result["reply"]}]},
-   ]
-   return AskResponse(**result, conversation_id=conversation_id)
-
-@app.post("/sales/ask", response_model=AskResponse)
-def ask_sales(req: AskRequest):
-   conversation_id = req.conversation_id or str(uuid.uuid4())
-   history = SALES_CONVERSATIONS.get(conversation_id, [])
-   result = run_sales_assurance_with_data(req.message, history=history)
-   SALES_CONVERSATIONS[conversation_id] = history + [
       {"role": "user", "content": req.message},
       {"role": "assistant", "content": [{"type": "text", "text": result["reply"]}]},
    ]

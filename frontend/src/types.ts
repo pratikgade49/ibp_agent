@@ -15,7 +15,7 @@ export interface ChatMessage {
 export interface Conversation {
   id: string;
   conversationId?: string;
-  agentMode?: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration';
+  agentMode?: 'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration';
   title: string;
   updatedAt: string;
   messages: ChatMessage[];
