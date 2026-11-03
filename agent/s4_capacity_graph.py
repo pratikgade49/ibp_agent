@@ -1,4 +1,4 @@
-"""Read-only SAP S/4HANA capacity agent graph."""
+"""SAP S/4HANA capacity agent graph with explicitly confirmed updates."""
 import json
 import os
 import re
@@ -14,6 +14,9 @@ from agent.s4_capacity_tools import (
     recommend_s4_group_alternates,
     recommend_s4_routing_alternates,
     read_s4_work_center_capacities,
+    read_s4_planned_orders_for_material,
+    delete_s4_planned_orders,
+    _schedule_date_value,
     update_s4_production_order_operation_work_center,
 )
 
@@ -88,6 +91,12 @@ not guess; use recommend_s4_group_alternates only when group-based alternates
 are appropriate. It checks configured work-center group members' evaluated
 capacity. Never infer alternates from work-center category or similarity.
 If neither source returns candidates, state which lookup returned no result.
+When a user asks a follow-up about a work center, material, or alternate from
+the immediately preceding capacity result, reuse the returned overloaded
+contributors and their dates. Assess every matching operation without asking
+the user to repeat order IDs, operation numbers, or dates already present in
+that result. Ask for clarification only when the prior evidence contains more
+than one plausible context and the request cannot be safely scoped.
 If the user asks to reassign an operation, use
 update_s4_production_order_operation_work_center to prepare the specific change.
 The first call is read-only and returns an exact approval_phrase. Show that
@@ -109,6 +118,24 @@ If the update tool returns an error, report SAP's error code and every detail
 message exactly as returned and state that no change was made. If it returns
 order_status_blocks_update or target_capacity_insufficient_for_operation,
 explain the reason and state that no change was made.
+After the production-order update returns status updated, automatically check
+for other planned orders using the production order's Material and Plant. Pass
+the production-order Plant as MRPPlant to the planned-order lookup. Report the
+found planned orders and their capacity assignments; if Material or Plant is
+absent or the lookup fails, state that the follow-up check is unverified.
+When checking planned orders for a material, call
+read_s4_planned_orders_for_material using the material and MRP plant. This
+lookup is filtered by those two values only; do not filter planned orders out
+by work center or date. Use capacity assignments and scheduled dates in the
+returned rows as evidence when discussing where and when each order is planned.
+When a user asks to delete planned orders, use the material and MRP plant from
+the prior lookup and pass the explicitly requested order IDs to
+delete_s4_planned_orders. The first call is a read-only preview and returns an
+exact approval_phrase. Show the order IDs, material, and MRP plant being
+deleted, then wait. Only a separate user message consisting exactly of that
+phrase authorizes deletion. Never infer approval from conversational assent.
+Report each order's deletion result separately, and claim deletion only when
+the tool verifies that the order no longer exists.
 """
 
 TOOL_REGISTRY = {
@@ -116,6 +143,8 @@ TOOL_REGISTRY = {
     "analyze_s4_capacity_load": analyze_s4_capacity_load,
     "recommend_s4_group_alternates": recommend_s4_group_alternates,
     "recommend_s4_routing_alternates": recommend_s4_routing_alternates,
+    "read_s4_planned_orders_for_material": read_s4_planned_orders_for_material,
+    "delete_s4_planned_orders": delete_s4_planned_orders,
     "update_s4_production_order_operation_work_center": update_s4_production_order_operation_work_center,
 }
 MAX_S4_HISTORY_MESSAGES = 12
@@ -205,6 +234,48 @@ TOOL_SCHEMAS = [
                 "evaluation_date": {"type": "string", "description": "Overload date, YYYY-MM-DD"},
             },
             "required": ["plant", "work_center", "order_id", "operation", "material", "evaluation_date"],
+        },
+    },
+    {
+        "name": "read_s4_planned_orders_for_material",
+        "description": (
+            "Find planned orders by exact Material and MRPPlant. Do not filter "
+            "candidates by work center or date; return capacity assignments and "
+            "dates as details. Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "material": {"type": "string", "description": "SAP material number"},
+                "mrp_plant": {"type": "string", "description": "MRP plant"},
+            },
+            "required": ["material", "mrp_plant"],
+        },
+    },
+    {
+        "name": "delete_s4_planned_orders",
+        "description": (
+            "Prepare deletion of selected planned orders after revalidating each "
+            "against material and MRP plant. First call is read-only and returns "
+            "an exact approval phrase. Delete only when that exact phrase is sent "
+            "in a separate user message; verifies each deletion by reading it back."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "material": {"type": "string", "description": "SAP material number"},
+                "mrp_plant": {"type": "string", "description": "MRP plant"},
+                "planned_order_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact planned-order IDs requested for deletion",
+                },
+                "approval_phrase": {
+                    "type": "string",
+                    "description": "Exact phrase returned by the prior read-only preparation call",
+                },
+            },
+            "required": ["material", "mrp_plant", "planned_order_ids"],
         },
     },
     {
@@ -431,6 +502,20 @@ def _assess_overloaded_alternates(result: dict) -> list[dict]:
                 "alternates": [],
             })
             continue
+        evaluation_date = _schedule_date_value(contributor.get("date"))
+        if not evaluation_date:
+            assessments.append({
+                "date": contributor.get("date"),
+                "plant": contributor.get("plant"),
+                "work_center": contributor.get("work_center"),
+                "order_id": contributor.get("order_id"),
+                "operation": contributor.get("operation"),
+                "material": contributor.get("material"),
+                "status": "date_unavailable",
+                "alternates": [],
+                "error": "The capacity contributor date could not be normalized to YYYY-MM-DD.",
+            })
+            continue
         try:
             assessment = recommend_s4_routing_alternates(
                 plant=str(contributor["plant"]),
@@ -438,7 +523,7 @@ def _assess_overloaded_alternates(result: dict) -> list[dict]:
                 order_id=str(contributor["order_id"]),
                 operation=str(contributor["operation"]),
                 material=str(contributor["material"]),
-                evaluation_date=str(contributor["date"]),
+                evaluation_date=evaluation_date,
             )
         except Exception as exc:
             assessment = {"status": "error", "error": str(exc)[:500], "alternates": []}
@@ -453,7 +538,7 @@ def _assess_overloaded_alternates(result: dict) -> list[dict]:
             for alternate in assessment.get("alternates", [])
         ]
         assessments.append({
-            "date": contributor.get("date"),
+            "date": evaluation_date,
             "plant": contributor.get("plant"),
             "work_center": contributor.get("work_center"),
             "order_id": contributor.get("order_id"),
@@ -486,10 +571,52 @@ def _tool_node(state: S4AgentState) -> dict:
             supplied_phrase = str(tool_input.get("approval_phrase", "")).strip()
             if supplied_phrase != _latest_user_text(state["messages"]).strip():
                 tool_input["approval_phrase"] = ""
+        if name == "delete_s4_planned_orders":
+            supplied_phrase = str(tool_input.get("approval_phrase", "")).strip()
+            if supplied_phrase != _latest_user_text(state["messages"]).strip():
+                tool_input["approval_phrase"] = ""
         try:
             result = TOOL_REGISTRY[name](**tool_input)
         except Exception as exc:
             result = {"error": str(exc)[:1500]}
+        if (
+            name == "update_s4_production_order_operation_work_center"
+            and result.get("status") == "updated"
+        ):
+            material = result.get("material")
+            mrp_plant = result.get("plant")
+            if material and mrp_plant:
+                try:
+                    result = {
+                        **result,
+                        "planned_order_follow_up": read_s4_planned_orders_for_material(
+                            material=str(material),
+                            mrp_plant=str(mrp_plant),
+                        ),
+                    }
+                except Exception as exc:
+                    result = {
+                        **result,
+                        "planned_order_follow_up": {
+                            "status": "error",
+                            "material": material,
+                            "mrp_plant": mrp_plant,
+                            "error": str(exc)[:500],
+                        },
+                    }
+            else:
+                result = {
+                    **result,
+                    "planned_order_follow_up": {
+                        "status": "incomplete",
+                        "material": material,
+                        "mrp_plant": mrp_plant,
+                        "message": (
+                            "SAP did not return both Material and Plant for the "
+                            "production order; planned-order follow-up is unverified."
+                        ),
+                    },
+                }
         if name == "analyze_s4_capacity_load" and "error" not in result:
             result = {
                 **result,

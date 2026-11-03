@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from urllib.parse import quote, urljoin, urlsplit
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -23,6 +23,7 @@ S4_ALTERNATE_WORK_CENTERS_ROOT = os.environ.get(
     "/sap/opu/odata/sap/ZALT_WC_FINDER_SRV",
 ).rstrip("/")
 S4_PRODUCTION_ORDERS_ROOT = "/sap/opu/odata/sap/API_PRODUCTION_ORDER_2_SRV"
+S4_PLANNED_ORDERS_ROOT = "/sap/opu/odata/sap/API_PLANNED_ORDERS"
 
 # Production-order statuses under which SAP refuses operation changes
 # (API_PRODUCTION_ORDER_2_SRV documentation).
@@ -514,6 +515,23 @@ def _same_operation(left: object, right: object) -> bool:
     if left_value.isdigit() and right_value.isdigit():
         return left_value.lstrip("0") == right_value.lstrip("0")
     return left_value == right_value
+
+
+def _schedule_date_value(value: object) -> str | None:
+    if not value:
+        return None
+    if isinstance(value, str) and value.startswith("/Date("):
+        try:
+            milliseconds = int(value[6:].split(")", 1)[0])
+            return datetime.fromtimestamp(
+                milliseconds / 1000, tz=timezone.utc
+            ).date().isoformat()
+        except (ValueError, OverflowError, OSError):
+            return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date().isoformat()
+    except ValueError:
+        return None
 
 
 def _operation_required_capacity(
@@ -1022,6 +1040,292 @@ def recommend_s4_routing_alternates(
     }
 
 
+def read_s4_planned_orders_for_material(
+    material: str,
+    mrp_plant: str,
+) -> dict:
+    """Find planned orders by material and MRP plant, independent of date/work center."""
+    if not material or not mrp_plant:
+        raise ValueError("material and mrp_plant are required")
+
+    order_rows = _collection_rows(
+        _s4_get(
+            "A_PlannedOrder",
+            {
+                "$filter": " and ".join((
+                    f"Material eq '{_odata_literal(material)}'",
+                    f"MRPPlant eq '{_odata_literal(mrp_plant)}'",
+                )),
+                "$select": ",".join((
+                    "PlannedOrder", "PlannedOrderType", "Material",
+                    "ProductionPlant", "MRPPlant", "PlndOrderPlannedStartDate",
+                    "PlndOrderPlannedEndDate", "ScheduledBasicStartDate",
+                    "ScheduledBasicEndDate", "CapacityRequirement",
+                )),
+                "$format": "json",
+            },
+            service_root=S4_PLANNED_ORDERS_ROOT,
+        )
+    )
+
+    planned_orders = []
+    for order in order_rows:
+        order_id = str(order.get("PlannedOrder") or "").strip()
+        row_material = str(order.get("Material") or "").strip()
+        row_mrp_plant = str(order.get("MRPPlant") or "").strip()
+        if (
+            not order_id
+            or row_material.casefold() != material.casefold()
+            or row_mrp_plant.casefold() != mrp_plant.casefold()
+        ):
+            continue
+
+        capacity_rows = _collection_rows(
+            _s4_get(
+                "A_PlannedOrderCapacity",
+                {
+                    "$filter": f"PlannedOrder eq '{_odata_literal(order_id)}'",
+                    "$format": "json",
+                },
+                service_root=S4_PLANNED_ORDERS_ROOT,
+            )
+        )
+        planned_orders.append({
+            "planned_order": order_id,
+            "planned_order_type": order.get("PlannedOrderType"),
+            "material": row_material,
+            "production_plant": order.get("ProductionPlant"),
+            "mrp_plant": row_mrp_plant,
+            "planned_start_date": _schedule_date_value(
+                order.get("PlndOrderPlannedStartDate")
+            ),
+            "planned_end_date": _schedule_date_value(
+                order.get("PlndOrderPlannedEndDate")
+            ),
+            "scheduled_start_date": _schedule_date_value(
+                order.get("ScheduledBasicStartDate")
+            ),
+            "scheduled_end_date": _schedule_date_value(
+                order.get("ScheduledBasicEndDate")
+            ),
+            "capacity_assignments": [
+                {
+                    "operation": row.get("Operation"),
+                    "plant": row.get("MRPPlant"),
+                    "work_center": row.get("WorkCenter"),
+                    "operation_start_date": _schedule_date_value(
+                        row.get("OperationEarliestStartDate")
+                        or row.get("OperationLatestStartDate")
+                    ),
+                    "operation_end_date": _schedule_date_value(
+                        row.get("OperationEarliestEndDate")
+                        or row.get("OperationLatestEndDate")
+                    ),
+                    "capacity_requirement": row.get("CapacityRequirement"),
+                    "capacity_unit": row.get("CapacityRequirementUnit"),
+                }
+                for row in capacity_rows
+            ],
+        })
+
+    planned_orders.sort(key=lambda row: (
+        row.get("planned_start_date") or "",
+        row["planned_order"],
+    ))
+    return {
+        "status": "completed",
+        "read_only": True,
+        "source": "SAP planned orders and capacity assignments",
+        "material": material,
+        "mrp_plant": mrp_plant,
+        "planned_order_count": len(planned_orders),
+        "planned_orders": planned_orders,
+    }
+
+
+def delete_s4_planned_orders(
+    material: str,
+    mrp_plant: str,
+    planned_order_ids: list[str],
+    approval_phrase: str = "",
+) -> dict:
+    """Prepare or explicitly confirm deletion of selected material/plant orders."""
+    if not material or not mrp_plant:
+        raise ValueError("material and mrp_plant are required")
+    requested_ids = sorted({str(order_id).strip() for order_id in planned_order_ids if str(order_id).strip()})
+    if not requested_ids:
+        raise ValueError("at least one planned_order_id is required")
+
+    current_rows = _collection_rows(
+        _s4_get(
+            "A_PlannedOrder",
+            {
+                "$filter": " and ".join((
+                    f"Material eq '{_odata_literal(material)}'",
+                    f"MRPPlant eq '{_odata_literal(mrp_plant)}'",
+                )),
+                "$select": ",".join((
+                    "PlannedOrder", "Material", "MRPPlant", "ProductionPlant",
+                    "PlannedOrderType", "PlndOrderPlannedStartDate",
+                    "PlndOrderPlannedEndDate",
+                )),
+                "$format": "json",
+            },
+            service_root=S4_PLANNED_ORDERS_ROOT,
+        )
+    )
+    current_by_id = {
+        str(row.get("PlannedOrder") or "").strip(): {
+            "planned_order": str(row.get("PlannedOrder") or "").strip(),
+            "material": row.get("Material"),
+            "mrp_plant": row.get("MRPPlant"),
+            "production_plant": row.get("ProductionPlant"),
+            "planned_order_type": row.get("PlannedOrderType"),
+            "planned_start_date": _schedule_date_value(
+                row.get("PlndOrderPlannedStartDate")
+            ),
+            "planned_end_date": _schedule_date_value(
+                row.get("PlndOrderPlannedEndDate")
+            ),
+        }
+        for row in current_rows
+        if str(row.get("PlannedOrder") or "").strip()
+        and str(row.get("Material") or "").strip().casefold() == material.casefold()
+        and str(row.get("MRPPlant") or "").strip().casefold() == mrp_plant.casefold()
+    }
+    missing_ids = [order_id for order_id in requested_ids if order_id not in current_by_id]
+    if missing_ids:
+        return {
+            "status": "planned_orders_not_found_for_scope",
+            "read_only": True,
+            "material": material,
+            "mrp_plant": mrp_plant,
+            "requested_order_ids": requested_ids,
+            "not_found_order_ids": missing_ids,
+            "message": "Every requested planned order must currently match the material and MRP plant; no deletion was attempted.",
+        }
+
+    expected_approval = (
+        f"CONFIRM DELETE PLANNED ORDERS {', '.join(requested_ids)} "
+        f"FOR {material} AT {mrp_plant}"
+    )
+    if approval_phrase.strip() != expected_approval:
+        return {
+            "status": "approval_required",
+            "read_only": True,
+            "material": material,
+            "mrp_plant": mrp_plant,
+            "planned_order_ids": requested_ids,
+            "planned_orders": [current_by_id[order_id] for order_id in requested_ids],
+            "approval_phrase": expected_approval,
+            "message": "No planned orders were deleted. A separate exact confirmation is required for this complete list.",
+        }
+
+    deletion_results = []
+    for order_id in requested_ids:
+        entity = f"A_PlannedOrder('{_odata_literal(order_id)}')"
+        base_url, request_options = _s4_request_config()
+        entity_url = f"{base_url}{S4_PLANNED_ORDERS_ROOT}/{entity}"
+        csrf_options = dict(request_options)
+        csrf_options["headers"] = {
+            **request_options.get("headers", {}),
+            "x-csrf-token": "Fetch",
+        }
+        csrf_response = requests.get(
+            entity_url,
+            params={"$format": "json"},
+            **csrf_options,
+        )
+        if not csrf_response.ok:
+            deletion_results.append({
+                "planned_order": order_id,
+                "status": "csrf_fetch_failed",
+                "http_status": csrf_response.status_code,
+            })
+            break
+
+        csrf_token = csrf_response.headers.get("x-csrf-token")
+        csrf_payload = csrf_response.json()
+        sap_order = csrf_payload.get("d", csrf_payload)
+        sap_material = str(sap_order.get("Material") or "").strip()
+        sap_mrp_plant = str(sap_order.get("MRPPlant") or "").strip()
+        etag = csrf_response.headers.get("ETag") or sap_order.get(
+            "__metadata", {}
+        ).get("etag")
+        if (
+            sap_material.casefold() != material.casefold()
+            or sap_mrp_plant.casefold() != mrp_plant.casefold()
+        ):
+            deletion_results.append({
+                "planned_order": order_id,
+                "status": "scope_changed",
+                "message": "The planned order no longer matches the confirmed material and MRP plant.",
+            })
+            break
+        if not csrf_token or not etag:
+            deletion_results.append({
+                "planned_order": order_id,
+                "status": "deletion_precondition_missing",
+                "message": "SAP did not return both CSRF token and ETag.",
+            })
+            break
+
+        delete_options = dict(request_options)
+        delete_options["headers"] = {
+            **request_options.get("headers", {}),
+            "x-csrf-token": csrf_token,
+            "If-Match": etag,
+        }
+        delete_options["cookies"] = csrf_response.cookies
+        response = requests.delete(entity_url, **delete_options)
+        if not response.ok:
+            deletion_results.append({
+                "planned_order": order_id,
+                "status": "delete_failed",
+                "http_status": response.status_code,
+                "error": _sap_error_summary(response),
+            })
+            break
+
+        verify_response = requests.get(
+            entity_url,
+            params={"$format": "json"},
+            **request_options,
+        )
+        if verify_response.status_code == 404:
+            deletion_results.append({
+                "planned_order": order_id,
+                "status": "deleted",
+            })
+        elif verify_response.ok:
+            deletion_results.append({
+                "planned_order": order_id,
+                "status": "delete_not_confirmed",
+                "message": "The follow-up read still found the planned order.",
+            })
+            break
+        else:
+            deletion_results.append({
+                "planned_order": order_id,
+                "status": "delete_accepted_unverified",
+                "http_status": verify_response.status_code,
+            })
+            break
+
+    all_deleted = len(deletion_results) == len(requested_ids) and all(
+        result["status"] == "deleted" for result in deletion_results
+    )
+    return {
+        "status": "deleted" if all_deleted else "partially_deleted_or_unverified",
+        "read_only": False,
+        "material": material,
+        "mrp_plant": mrp_plant,
+        "requested_order_ids": requested_ids,
+        "deletion_results": deletion_results,
+        "not_attempted_order_ids": requested_ids[len(deletion_results):],
+    }
+
+
 def update_s4_production_order_operation_work_center(
     order_id: str,
     operation: str,
@@ -1076,6 +1380,12 @@ def update_s4_production_order_operation_work_center(
     current_work_center = str(current.get("WorkCenter", "")).strip()
     plant = str(current.get("ProductionPlant", "")).strip()
     material = str(order.get("Material", "")).strip()
+    mrp_plant = str(
+        order.get("Plant")
+        or order.get("ProductionPlant")
+        or current.get("ProductionPlant")
+        or ""
+    ).strip()
     if not plant or not current_work_center or not material:
         raise RuntimeError(
             "SAP operation/order data must include ProductionPlant, WorkCenter, and Material"
@@ -1341,6 +1651,7 @@ def update_s4_production_order_operation_work_center(
         "operation": operation,
         "plant": plant,
         "material": material,
+        "mrp_plant": mrp_plant or None,
         "previous_work_center": current_work_center,
         "work_center": verified_work_center,
         "evaluation_date": evaluation_date,
