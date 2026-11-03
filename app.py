@@ -15,7 +15,10 @@ from agent.s4_capacity_graph import run_s4_agent_with_data
 from agent.sales_assurance import run_sales_assurance_with_data
 from agent.maintenance_graph import run_maintenance_agent_with_data
 from customer_base_agent.graph import run_customer_base_agent
+from product_migration_agent.api import router as migration_router
+
 app = FastAPI(title="IBP Demand Planning Agent")
+app.include_router(migration_router)
 
 ROOT_DIR = Path(__file__).resolve().parent
 STATIC_DIR = ROOT_DIR / "static"

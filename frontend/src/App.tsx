@@ -13,6 +13,7 @@ import {
   Clock3,
   Database,
   Factory,
+  FileSpreadsheet,
   Layers3,
   MessageSquarePlus,
   PanelLeftClose,
@@ -37,6 +38,7 @@ import {
 import type { AskResponse, ChatMessage, Conversation, DataRecord, Insight } from './types';
 import SalesAssurance from './SalesAssurance';
 import ScenarioTestAgent from './ScenarioTestAgent';
+import ProductMigration from './ProductMigration';
 
 const STORAGE_KEY = 'ibp-demand-desk-conversations-v1';
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -48,7 +50,7 @@ const PROMPTS = [
 ];
 
 const AGENTS: Array<{
-  id: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario';
+  id: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration';
   index: string;
   name: string;
   descriptor: string;
@@ -106,6 +108,16 @@ const AGENTS: Array<{
     capabilities: ['Order exposure', 'Supply alternatives', 'Decision support'],
     icon: ShieldCheck,
     tone: 'coral',
+  },
+  {
+    id: 'migration',
+    index: '05',
+    name: 'Product Master Migration',
+    descriptor: 'Oracle to S/4HANA conversion',
+    description: 'Upload data, mapping and rules; the agent interprets the rules, translates codes and returns the converted Excel.',
+    capabilities: ['AI-compiled rules', 'Automatic code translation', 'Change log and audit trail'],
+    icon: FileSpreadsheet,
+    tone: 'blue',
   },
 ];
 
@@ -782,7 +794,7 @@ function formatDate(value: string): string {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales' |'maintenance' | 'scenario'>('ibp');
+  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration'>('ibp');
   const [showAgentDirectory, setShowAgentDirectory] = useState(true);
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
@@ -834,7 +846,7 @@ export default function App() {
     setHistoryCollapsed((collapsed) => !collapsed);
   }
 
-  function selectAgentMode(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario') {
+  function selectAgentMode(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration') {
     if (mode === agentMode) return;
     setAgentMode(mode);
     if (activeConversation && (activeConversation.agentMode || 'ibp') !== mode) {
@@ -843,7 +855,7 @@ export default function App() {
     setError('');
   }
 
-  function openAgent(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario') {
+  function openAgent(mode: 'ibp' | 's4' | 'sales' | 'maintenance' | 'scenario' | 'migration') {
     selectAgentMode(mode);
     setShowAgentDirectory(false);
     setHistoryOpen(false);
@@ -998,6 +1010,9 @@ export default function App() {
         onShowAgents={() => setShowAgentDirectory(true)}
       />
     );
+  }
+  if (agentMode === 'migration') {
+    return <ProductMigration onShowAgents={() => setShowAgentDirectory(true)} />;
   }
   if (agentMode === 'scenario') {
     return (

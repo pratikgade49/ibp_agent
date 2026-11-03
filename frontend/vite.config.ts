@@ -10,6 +10,7 @@ export default defineConfig(({ command }) => ({
       '/s4': 'http://127.0.0.1:8080',
       '/sales': 'http://127.0.0.1:8080',
       '/customer-base': 'http://127.0.0.1:8080',
+      '/migration': 'http://127.0.0.1:8080',
       '/health': 'http://127.0.0.1:8080',
     },
   },

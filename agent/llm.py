@@ -32,6 +32,11 @@ class LLMClient:
        """Returns a single assistant message in the common format above."""
        raise NotImplementedError
 
+    def complete(self, system: str, user: str, max_tokens: int = 2000) -> str:
+       """Plain text-in / text-out helper (no tools), for agents that need a one-shot answer such as JSON."""
+       reply = self.chat(system, [{"role": "user", "content": [{"type": "text", "text": user}]}], [], max_tokens)
+       return "".join(b.get("text", "") for b in reply.get("content", []) if b.get("type") == "text")
+
 # ---------------------------------------------------------------------------
 # Anthropic (Claude) -- common format IS Anthropic's native format
 # ---------------------------------------------------------------------------
@@ -49,7 +54,7 @@ class AnthropicClient(LLMClient):
             max_tokens=max_tokens,
             system=system,
             messages=messages,
-            tools=tools,
+            **({"tools": tools} if tools else {}),
         )
         content = []
         for block in response.content:
@@ -80,7 +85,7 @@ class DeepSeekClient(LLMClient):
             model=self._model,
             max_tokens=max_tokens,
             messages=openai_messages,
-            tools=openai_tools,
+            **({"tools": openai_tools} if openai_tools else {}),
         )
         return self._from_openai_message(response.choices[0].message)
     @staticmethod
@@ -173,7 +178,7 @@ class GeminiClient(LLMClient):
         from google.genai import types
         config = types.GenerateContentConfig(
             system_instruction=system,
-            tools=[self._to_gemini_tool(tools)],
+            tools=[self._to_gemini_tool(tools)] if tools else None,
             max_output_tokens=max_tokens,
         )
         contents = self._to_gemini_contents(messages)
@@ -299,8 +304,8 @@ class BedrockClient(LLMClient):
             modelId=self._model,
             system=[{"text": system}],
             messages=self._to_bedrock_messages(messages),
-            toolConfig=self._to_bedrock_tool_config(tools),
             inferenceConfig={"maxTokens": max_tokens},
+            **({"toolConfig": self._to_bedrock_tool_config(tools)} if tools else {}),
         )
         return self._from_bedrock_response(response)
 
