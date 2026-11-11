@@ -435,8 +435,11 @@ function S4CapacityEvidence({ data }: { data: DataRecord }) {
           );
           const alternates = asRecords(assessment?.alternates);
           const suitable = alternates.filter((alternate) => alternate.sufficient_for_operation === true);
+          const sharedCapacityConflict = alternates.some((alternate) => alternate.capacity_conflict === true);
           const alternateSummary = suitable.length
             ? suitable.map((alternate) => `${formatValue(alternate.work_center)} (${formatValue(alternate.remaining_after_move)} ${formatValue(order.capacity_unit)} remaining)`).join(', ')
+            : sharedCapacityConflict
+              ? 'Candidate capacity is shared with another affected operation'
             : !assessment || assessment.status !== 'completed'
               ? 'Could not verify'
               : alternates.length
@@ -482,6 +485,8 @@ function S4CapacityEvidence({ data }: { data: DataRecord }) {
                     <li key={`${String(order.order_id)}-${String(order.operation)}`}>
                       {suitable.length > 0
                         ? `I recommend moving order ${formatValue(order.order_id)}, operation ${formatValue(order.operation)}, to ${suitable.map((alternate) => formatValue(alternate.work_center)).join(' or ')}; capacity fit is verified. Confirm the schedule with the planner before making any change.`
+                        : asRecords(assessment?.alternates).some((alternate) => alternate.capacity_conflict === true)
+                          ? `The matched alternate for order ${formatValue(order.order_id)}, operation ${formatValue(order.operation)}, shares capacity with another affected operation. The combined load does not fit, so I recommend planner review to decide which operation to prioritize.`
                           : !assessment || assessment.status !== 'completed'
                           ? `I could not verify an alternate for order ${formatValue(order.order_id)}, operation ${formatValue(order.operation)}. Please review the schedule with the planner; no change has been made.`
                           : `I found no suitable alternate with verified capacity for order ${formatValue(order.order_id)}, operation ${formatValue(order.operation)}. Please review the schedule with the planner; no change has been made.`}

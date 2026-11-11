@@ -79,7 +79,12 @@ dates with evaluated nonnegative remaining capacity. Be explicit about
 incomplete or empty results.
 Alternate work-center assessments are automatically included with capacity
 analysis for each overloaded contributor. Use those results rather than
-requesting the same lookup again. ZALT_WC_FINDER_SRV is the authoritative finder for
+requesting the same lookup again. When a single user message asks whether
+there is a bottleneck and asks for alternate work centers for affected orders,
+complete both tasks in that turn: call analyze_s4_capacity_load once, wait for
+its attached alternate_assessments, and give the combined result. Never stop
+after reporting bottlenecks or ask the user to repeat the request to check
+alternates. ZALT_WC_FINDER_SRV is the authoritative finder for
 the Class 019 operation classification: it compares the operation's assigned
 class/characteristic values to alternate work-center assignments. Order,
 operation, material, plant, and source work center identify the exact operation
@@ -112,7 +117,10 @@ recommend_s4_routing_alternates also returns operation_required_capacity and,
 per alternate, sufficient_for_operation and remaining_after_move. Recommend only
 alternates where sufficient_for_operation is true. If it is null, say that fit
 could not be verified; if false, say the alternate's remaining capacity is too
-small for the operation. recommend_s4_group_alternates only checks for
+small for the operation. Automatic assessments account for capacity already
+allocated to other overloaded operations on the same alternate/date; if an
+assessment marks capacity_conflict, explain that the alternate cannot cover the
+combined load and do not recommend both moves. recommend_s4_group_alternates only checks for
 nonnegative remaining capacity, not whether the operation fits; say so.
 If the update tool returns an error, report SAP's error code and every detail
 message exactly as returned and state that no change was made. If it returns
@@ -182,8 +190,11 @@ TOOL_SCHEMAS = [
             "per-order load distribution for a date range and bucket type, "
             "optionally filtered by plant and/or work center. Omit both filters "
             "to evaluate all accessible plants and work centers. Returns evaluated required capacity, "
-            "available capacity, remaining capacity, utilization, and order "
-            "contributors. Use bucket_type D for daily evaluation. Read-only."
+            "available capacity, remaining capacity, utilization, order "
+            "contributors, and automatically assessed routing alternates for "
+            "overloaded contributors. Use this single tool for a combined "
+            "bottleneck-and-alternate request. Use bucket_type D for daily "
+            "evaluation. Read-only."
         ),
         "input_schema": {
             "type": "object",
@@ -232,6 +243,8 @@ TOOL_SCHEMAS = [
                 "operation": {"type": "string", "description": "Operation number (Vornr)"},
                 "material": {"type": "string", "description": "Material number (Matnr)"},
                 "evaluation_date": {"type": "string", "description": "Overload date, YYYY-MM-DD"},
+                "required_capacity": {"type": "number", "description": "Known operation capacity from the current SAP capacity evaluation"},
+                "required_unit": {"type": "string", "description": "Unit for required_capacity"},
             },
             "required": ["plant", "work_center", "order_id", "operation", "material", "evaluation_date"],
         },
@@ -471,6 +484,7 @@ def _assess_overloaded_alternates(result: dict) -> list[dict]:
     }
     seen = set()
     assessments = []
+    reserved_alternate_capacity = {}
     for contributor in result.get("contributors", []):
         if not isinstance(contributor, dict):
             continue
@@ -524,19 +538,53 @@ def _assess_overloaded_alternates(result: dict) -> list[dict]:
                 operation=str(contributor["operation"]),
                 material=str(contributor["material"]),
                 evaluation_date=evaluation_date,
+                **(
+                    {
+                        "required_capacity": contributor["required_capacity"],
+                        "required_unit": contributor.get("capacity_unit"),
+                    }
+                    if contributor.get("required_capacity") is not None
+                    else {}
+                ),
             )
         except Exception as exc:
             assessment = {"status": "error", "error": str(exc)[:500], "alternates": []}
-        alternates = [
-            {
+        alternates = []
+        for alternate in assessment.get("alternates", []):
+            alternate_result = {
                 "work_center": alternate.get("work_center"),
                 "plant": alternate.get("plant"),
                 "capacity_status": alternate.get("capacity_status"),
                 "sufficient_for_operation": alternate.get("sufficient_for_operation"),
                 "remaining_after_move": alternate.get("remaining_after_move"),
             }
-            for alternate in assessment.get("alternates", [])
-        ]
+            required_capacity = assessment.get("operation_required_capacity")
+            required_unit = assessment.get("operation_required_capacity_unit")
+            if (
+                alternate_result["sufficient_for_operation"] is True
+                and required_capacity is not None
+            ):
+                reservation_key = (
+                    evaluation_date,
+                    str(alternate_result["plant"]),
+                    str(alternate_result["work_center"]),
+                    str(required_unit or "").strip().casefold(),
+                )
+                already_reserved = reserved_alternate_capacity.get(reservation_key, 0.0)
+                adjusted_remaining = round(
+                    float(alternate_result["remaining_after_move"] or 0.0)
+                    - already_reserved,
+                    3,
+                )
+                alternate_result["remaining_after_move"] = adjusted_remaining
+                if adjusted_remaining < 0:
+                    alternate_result["sufficient_for_operation"] = False
+                    alternate_result["capacity_conflict"] = True
+                else:
+                    reserved_alternate_capacity[reservation_key] = (
+                        already_reserved + float(required_capacity)
+                    )
+            alternates.append(alternate_result)
         assessments.append({
             "date": evaluation_date,
             "plant": contributor.get("plant"),

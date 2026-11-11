@@ -1,6 +1,7 @@
 """Read SAP S/4HANA work-center capacity and shift configuration."""
 import json
 import os
+import re
 import threading
 import time
 from urllib.parse import quote, urljoin, urlsplit
@@ -522,11 +523,19 @@ def _schedule_date_value(value: object) -> str | None:
         return None
     if isinstance(value, str) and value.startswith("/Date("):
         try:
-            milliseconds = int(value[6:].split(")", 1)[0])
+            match = re.fullmatch(r"/Date\((-?\d+)(?:[+-]\d{4})?\)/", value)
+            if not match:
+                return None
+            milliseconds = int(match.group(1))
             return datetime.fromtimestamp(
                 milliseconds / 1000, tz=timezone.utc
             ).date().isoformat()
         except (ValueError, OverflowError, OSError):
+            return None
+    if isinstance(value, str) and re.fullmatch(r"\d{8}", value):
+        try:
+            return datetime.strptime(value, "%Y%m%d").date().isoformat()
+        except ValueError:
             return None
     try:
         return datetime.fromisoformat(str(value)[:10]).date().isoformat()
@@ -572,6 +581,13 @@ def _operation_required_capacity(
     return max(required_values), unit
 
 
+def _capacity_unit_key(unit: object) -> str:
+    normalized = str(unit or "").strip().casefold()
+    if normalized in {"h", "hr", "hur", "hour", "hours"}:
+        return "hour"
+    return normalized
+
+
 def _capacity_fit(
     capacity_rows: list[dict],
     required: float | None,
@@ -594,7 +610,11 @@ def _capacity_fit(
     for row in capacity_rows:
         remaining = row.get("remaining_capacity")
         row_unit = row.get("capacity_unit")
-        if remaining is None or (required_unit and row_unit and required_unit != row_unit):
+        if remaining is None or (
+            required_unit
+            and row_unit
+            and _capacity_unit_key(required_unit) != _capacity_unit_key(row_unit)
+        ):
             return fit
         remaining_values.append(remaining)
     after = min(remaining_values) - required
@@ -672,7 +692,8 @@ def analyze_s4_capacity_load(
             utilization = required / available * 100
 
         evaluation = {
-                "date": row.get("CapacityEvaluationTimePeriod"),
+            "date": _schedule_date_value(row.get("CapacityEvaluationTimePeriod"))
+            or row.get("CapacityEvaluationTimePeriod"),
                 "date_text": row.get("CapacityEvaluationTimePerdText"),
                 "plant": row.get("Plant"),
                 "work_center": row.get("WorkCenter"),
@@ -703,7 +724,8 @@ def analyze_s4_capacity_load(
 
     contributors = [
         {
-            "date": row.get("CapacityEvaluationTimePeriod"),
+            "date": _schedule_date_value(row.get("CapacityEvaluationTimePeriod"))
+            or row.get("CapacityEvaluationTimePeriod"),
             "plant": row.get("Plant"),
             "work_center": row.get("WorkCenter"),
             "order_id": row.get("OrderID"),
@@ -924,6 +946,8 @@ def recommend_s4_routing_alternates(
     operation: str,
     material: str,
     evaluation_date: str,
+    required_capacity: float | None = None,
+    required_unit: str | None = None,
 ) -> dict:
     """Read Class 019 operation alternates and check their SAP capacity."""
     if not all((plant, work_center, order_id, operation, material)):
@@ -962,11 +986,12 @@ def recommend_s4_routing_alternates(
         and str(row.get("Matnr", "")).strip() == material
         and str(row.get("MatchStatus", "")).strip().upper() == "MATCH"
     ]
-    required_capacity, required_unit = (
-        _operation_required_capacity(plant, work_center, order_id, operation, evaluation_date)
-        if match_rows
-        else (None, None)
-    )
+    if required_capacity is None:
+        required_capacity, required_unit = (
+            _operation_required_capacity(plant, work_center, order_id, operation, evaluation_date)
+            if match_rows
+            else (None, None)
+        )
     for row in match_rows:
         alternate_plant = row.get("AltWerks")
         alternate_work_center = row.get("AltArbpl")

@@ -3,19 +3,122 @@ from unittest.mock import patch
 
 from agent.s4_capacity_tools import (
     S4_PLANNED_ORDERS_ROOT,
+    _capacity_fit,
     _schedule_date_value,
+    analyze_s4_capacity_load,
     delete_s4_planned_orders,
+    recommend_s4_routing_alternates,
     read_s4_planned_orders_for_material,
 )
 from agent import s4_capacity_graph
 
 
 class PlannedOrderMaterialLookupTests(unittest.TestCase):
+    def test_capacity_fit_accepts_equivalent_hour_units(self):
+        result = _capacity_fit(
+            [{"remaining_capacity": 8.0, "capacity_unit": "H"}],
+            8.0,
+            "HR",
+        )
+
+        self.assertTrue(result["sufficient_for_operation"])
+        self.assertEqual(result["remaining_after_move"], 0.0)
+
+    def test_capacity_fit_does_not_compare_incompatible_units(self):
+        result = _capacity_fit(
+            [{"remaining_capacity": 480.0, "capacity_unit": "MIN"}],
+            8.0,
+            "HR",
+        )
+
+        self.assertIsNone(result["sufficient_for_operation"])
+
+    def test_routing_alternate_uses_known_operation_capacity(self):
+        finder_payload = {"d": {"results": [{
+            "Aufnr": "000001001821",
+            "Vornr": "0020",
+            "Matnr": "3000250",
+            "MatchStatus": "MATCH",
+            "AltWerks": "PL01",
+            "AltArbpl": "WCEN005",
+        }]}}
+        with (
+            patch("agent.s4_capacity_tools._s4_get", return_value=finder_payload),
+            patch(
+                "agent.s4_capacity_tools.analyze_s4_capacity_load",
+                return_value={"capacity_evaluations": [{
+                    "remaining_capacity": 8.0,
+                    "capacity_unit": "H",
+                    "status": "within_capacity",
+                }]},
+            ),
+            patch("agent.s4_capacity_tools._operation_required_capacity") as read_source_capacity,
+        ):
+            result = recommend_s4_routing_alternates(
+                plant="PL01",
+                work_center="WCEN009",
+                order_id="000001001821",
+                operation="0020",
+                material="3000250",
+                evaluation_date="2026-11-11",
+                required_capacity=8.0,
+                required_unit="HR",
+            )
+
+        read_source_capacity.assert_not_called()
+        alternate = result["alternates"][0]
+        self.assertEqual(alternate["work_center"], "WCEN005")
+        self.assertTrue(alternate["sufficient_for_operation"])
+        self.assertEqual(alternate["remaining_after_move"], 0.0)
+
     def test_schedule_date_parser_handles_sap_odata_epoch_date(self):
         self.assertEqual(
             _schedule_date_value("/Date(1793664000000)/"),
             "2026-11-03",
         )
+        self.assertEqual(
+            _schedule_date_value("/Date(1793664000000+0000)/"),
+            "2026-11-03",
+        )
+        self.assertEqual(
+            _schedule_date_value("20261117"),
+            "2026-11-17",
+        )
+
+    def test_capacity_load_normalizes_compact_dates_for_buckets_and_contributors(self):
+        aggregate_payload = {"d": {"results": [{
+            "CapacityEvaluationTimePeriod": "20261117",
+            "Plant": "PL01",
+            "WorkCenter": "WCEN009",
+            "WorkCenterCapRqmtInCapUnit": "16.0",
+            "WorkCenterAvailableCapacity": "8.0",
+            "WrkCtrRmngCapInCapUnit": "-8.0",
+            "WorkCenterCapacityUnit": "H",
+        }]}}
+        contributor_payload = {"d": {"results": [{
+            "CapacityEvaluationTimePeriod": "20261117",
+            "Plant": "PL01",
+            "WorkCenter": "WCEN009",
+            "OrderID": "000001001821",
+            "Operation": "0020",
+            "Material": "3000250",
+            "WorkCenterCapRqmtInCapUnit": "8.0",
+            "WorkCenterCapacityUnit": "H",
+        }]}}
+        with patch(
+            "agent.s4_capacity_tools._s4_get",
+            side_effect=[aggregate_payload, contributor_payload],
+        ):
+            result = analyze_s4_capacity_load(
+                plant="PL01",
+                work_center="WCEN009",
+                start_date="2026-11-17",
+                end_date="2026-11-17",
+            )
+
+        self.assertEqual(result["capacity_evaluations"][0]["date"], "2026-11-17")
+        self.assertEqual(result["contributors"][0]["date"], "2026-11-17")
+        self.assertEqual(result["evaluated_bucket_dates"], ["2026-11-17"])
 
     def test_filters_by_material_and_mrp_plant_not_work_center_or_date(self):
         order_payload = {"d": {"results": [{
@@ -97,21 +200,23 @@ class PlannedOrderMaterialLookupTests(unittest.TestCase):
             planned_order_result,
         )
 
-    def test_automatic_alternate_check_normalizes_sap_epoch_date(self):
+    def test_automatic_alternate_check_normalizes_sap_compact_date(self):
         capacity_result = {
             "capacity_evaluations": [{
-                "date": "/Date(1793664000000)/",
+                "date": "20261117",
                 "plant": "PL01",
                 "work_center": "PPDS_WC3",
                 "status": "overloaded",
             }],
             "contributors": [{
-                "date": "/Date(1793664000000)/",
+                "date": "20261117",
                 "plant": "PL01",
                 "work_center": "PPDS_WC3",
                 "order_id": "000001001893",
                 "operation": "0010",
                 "material": "FG_PPDS",
+                "required_capacity": 8.0,
+                "capacity_unit": "H",
             }],
         }
         with patch.object(
@@ -127,9 +232,137 @@ class PlannedOrderMaterialLookupTests(unittest.TestCase):
             order_id="000001001893",
             operation="0010",
             material="FG_PPDS",
-            evaluation_date="2026-11-03",
+            evaluation_date="2026-11-17",
+            required_capacity=8.0,
+            required_unit="H",
         )
-        self.assertEqual(result[0]["date"], "2026-11-03")
+        self.assertEqual(result[0]["date"], "2026-11-17")
+
+    def test_single_capacity_tool_call_includes_automatic_alternate_assessment(self):
+        capacity_result = {
+            "status": "completed",
+            "capacity_evaluations": [{
+                "date": "2026-11-17",
+                "plant": "PL01",
+                "work_center": "WCEN009",
+                "required_capacity": 16.0,
+                "available_capacity": 8.0,
+                "remaining_capacity": -8.0,
+                "capacity_unit": "H",
+                "status": "overloaded",
+            }],
+            "contributors": [{
+                "date": "2026-11-17",
+                "plant": "PL01",
+                "work_center": "WCEN009",
+                "order_id": "000001001821",
+                "operation": "0020",
+                "material": "3000250",
+                "required_capacity": 8.0,
+                "capacity_unit": "H",
+            }],
+        }
+        alternate_result = {
+            "status": "completed",
+            "alternate_count": 1,
+            "alternates": [{
+                "work_center": "WCEN005",
+                "plant": "PL01",
+                "capacity_status": "within_capacity",
+                "sufficient_for_operation": True,
+                "remaining_after_move": 0.0,
+            }],
+        }
+        messages = [
+            {"role": "user", "content": (
+                "Is there a capacity bottleneck, and what alternate work center "
+                "is available for affected orders?"
+            )},
+            {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "capacity-call",
+                "name": "analyze_s4_capacity_load",
+                "input": {"start_date": "2026-11-17", "end_date": "2026-11-17"},
+            }]},
+        ]
+        with (
+            patch.dict(
+                s4_capacity_graph.TOOL_REGISTRY,
+                {"analyze_s4_capacity_load": lambda **_: capacity_result},
+            ),
+            patch.object(
+                s4_capacity_graph,
+                "recommend_s4_routing_alternates",
+                return_value=alternate_result,
+            ) as recommend,
+        ):
+            result = s4_capacity_graph._tool_node({"messages": messages, "insights": []})
+
+        recommend.assert_called_once_with(
+            plant="PL01",
+            work_center="WCEN009",
+            order_id="000001001821",
+            operation="0020",
+            material="3000250",
+            evaluation_date="2026-11-17",
+            required_capacity=8.0,
+            required_unit="H",
+        )
+        self.assertEqual(
+            result["insights"][0]["data"]["alternate_assessments"][0]["alternates"][0]["work_center"],
+            "WCEN005",
+        )
+
+    def test_alternate_checks_do_not_double_book_same_day_capacity(self):
+        capacity_result = {
+            "capacity_evaluations": [{
+                "date": "2026-11-17",
+                "plant": "PL01",
+                "work_center": "WCEN009",
+                "status": "overloaded",
+            }],
+            "contributors": [
+                {
+                    "date": "2026-11-17",
+                    "plant": "PL01",
+                    "work_center": "WCEN009",
+                    "order_id": order_id,
+                    "operation": "0020",
+                    "material": "3000250",
+                    "required_capacity": 8.0,
+                    "capacity_unit": "H",
+                }
+                for order_id in ("000001001820", "000001001821")
+            ],
+        }
+
+        def find_eight_hour_alternate(**_):
+            return {
+                "status": "completed",
+                "operation_required_capacity": 8.0,
+                "operation_required_capacity_unit": "HR",
+                "alternates": [{
+                    "work_center": "WCEN005",
+                    "plant": "PL01",
+                    "capacity_status": "within_capacity",
+                    "sufficient_for_operation": True,
+                    "remaining_after_move": 0.0,
+                }],
+            }
+
+        with patch.object(
+            s4_capacity_graph,
+            "recommend_s4_routing_alternates",
+            side_effect=find_eight_hour_alternate,
+        ):
+            assessments = s4_capacity_graph._assess_overloaded_alternates(capacity_result)
+
+        first_alternate = assessments[0]["alternates"][0]
+        second_alternate = assessments[1]["alternates"][0]
+        self.assertTrue(first_alternate["sufficient_for_operation"])
+        self.assertFalse(second_alternate["sufficient_for_operation"])
+        self.assertTrue(second_alternate["capacity_conflict"])
+        self.assertEqual(second_alternate["remaining_after_move"], -8.0)
 
     def test_batch_delete_preview_is_read_only_and_returns_exact_phrase(self):
         scoped_orders = {"d": {"results": [
