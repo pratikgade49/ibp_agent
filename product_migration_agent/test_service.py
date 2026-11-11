@@ -47,11 +47,16 @@ FIXTURES = {
 
 
 class FakeLLM:
-    def __init__(self, overrides=None):
+    def __init__(self, overrides=None, correction_response=None):
         self.calls, self.fx = 0, {**FIXTURES, **(overrides or {})}
+        self.correction_response = correction_response
 
     def complete(self, system, user, max_tokens=2000):
         self.calls += 1
+        if "CORRECTION_REQUEST:" in user:
+            if self.correction_response is None:
+                return json.dumps({"updates": [], "message": "Please specify the field and value."})
+            return json.dumps(self.correction_response)
         return "```json\n" + json.dumps(self.fx[re.search(r"SAP_FIELD:\s*(\w+)", user).group(1)]) + "\n```"
 
 
@@ -91,11 +96,32 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(list(s["CONVERTED_DATA"]["MEINS"]), ["EA", "EA", "EA"])
         self.assertEqual(list(s["CONVERTED_DATA"]["DISMM"])[:2], ["X0", "PD"])
 
+    def test_mapping_for_missing_oracle_column_is_skipped(self):
+        data, mapping, rules = inputs()
+        source = pd.read_excel(io.BytesIO(data), dtype=str, keep_default_na=False)
+        source = source.drop(columns=["Procurement Type"])
+        result = convert_files(
+            xlsx(source.values.tolist(), source.columns.tolist()), mapping, rules, llm=FakeLLM(),
+        )
+
+        converted = self.sheets(result)["CONVERTED_DATA"]
+        self.assertNotIn("BESKZ", converted.columns)
+        self.assertTrue(any("Procurement Type" in warning for warning in result.summary["warnings"]))
+        self.assertEqual(len(converted), len(DATA))
+
     def test_unknowable_value_goes_to_human_not_guessed(self):
         res = convert_files(*inputs(), llm=FakeLLM())
         self.assertEqual([h["field"] for h in res.human_needed], ["BESKZ"])
         self.assertEqual(self.sheets(res)["CONVERTED_DATA"]["BESKZ"][2], "0")
         self.assertEqual(res.summary["ready"], 1)
+
+    def test_preview_includes_issue_rows_and_descriptions(self):
+        res = convert_files(*inputs(), llm=FakeLLM())
+        preview = res.summary["preview"]
+        self.assertEqual(len(preview), len(DATA))
+        issue_row = next(row for row in preview if row["MATNR"] == "A2")
+        self.assertTrue(any(issue["severity"] == "ERROR" and issue["field"] == "NTGEW"
+                            and "violated" in issue["message"] for issue in issue_row["_row_issues"]))
 
     def test_low_confidence_rule_is_not_applied(self):
         llm = FakeLLM({"DISMM": {**FIXTURES["DISMM"], "confidence": 0.4}})
@@ -103,9 +129,69 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("DISMM", [h["field"] for h in res.human_needed if h["type"] == "rule"])
         self.assertEqual(list(self.sheets(res)["CONVERTED_DATA"]["DISMM"]), ["PD", "PD", "PD"])
 
-    def test_manual_correction_updates_exported_data(self):
-        res = convert_files(*inputs(), llm=FakeLLM(), correction_text="set BESKZ to E")
-        self.assertEqual(list(self.sheets(res)["CONVERTED_DATA"]["BESKZ"]), ["E", "E", "E"])
+    def test_llm_correction_updates_target_and_revalidates(self):
+        llm = FakeLLM(correction_response={"updates": [
+            {"field": "BESKZ", "value": "E", "material": "A3"}], "message": "Updated procurement type."})
+        res = convert_files(*inputs(), llm=llm, correction_text="For material A3, change procurement type to E")
+        workbook = self.sheets(res)["CONVERTED_DATA"]
+        self.assertEqual(workbook.loc[2, "BESKZ"], "E")
+        self.assertEqual(workbook.loc[2, "DISMM"], "X0")
+        self.assertEqual(res.summary["ready"], 2)
+        self.assertTrue(res.summary["correction_applied"])
+        self.assertEqual(res.summary["changes_applied"], 13)
+
+    def test_matnr_correction_wording_updates_only_named_material(self):
+        data, mapping, rules = inputs()
+        source = pd.read_excel(io.BytesIO(data), dtype=str, keep_default_na=False)
+        source.loc[0, "Product Number"] = "WSW3MYM2HN"
+        source["Product Group"] = ""
+        mapping_frame = pd.read_excel(io.BytesIO(mapping), dtype=str, keep_default_na=False)
+        mapping_frame.loc[len(mapping_frame)] = ["Product Group", "MARA", "MATKL", "Material Group", "CHAR", "9", "N"]
+        rules_frame = pd.read_excel(io.BytesIO(rules), dtype=str, keep_default_na=False)
+        rules_frame.loc[len(rules_frame)] = ["MATKL", "Material Group", "N", "", "Blank"]
+        llm = FakeLLM(correction_response={"updates": [
+            {"field": "MATKL", "value": "RHW430", "material": "WSW3MYM2HN"}], "message": "Updated material group."})
+        res = convert_files(
+            xlsx(source.values.tolist(), source.columns.tolist()),
+            xlsx(mapping_frame.values.tolist(), mapping_frame.columns.tolist()),
+            xlsx(rules_frame.values.tolist(), rules_frame.columns.tolist()),
+            llm=llm,
+            correction_text="Set MATKL as RHW430 for MATNR WSW3MYM2HN",
+        )
+        workbook = self.sheets(res)["CONVERTED_DATA"]
+        self.assertEqual(workbook.loc[0, "MATKL"], "RHW430")
+        self.assertEqual(workbook.loc[1:, "MATKL"].tolist(), ["", ""])
+        self.assertTrue(res.summary["correction_applied"])
+
+    def test_mbrsh_same_field_rule_maps_oil_to_o(self):
+        data, mapping, rules = inputs()
+        source = pd.read_excel(io.BytesIO(data), dtype=str, keep_default_na=False)
+        source["Industry Sector"] = "OIL"
+        mapping_frame = pd.read_excel(io.BytesIO(mapping), dtype=str, keep_default_na=False)
+        mapping_frame.loc[len(mapping_frame)] = ["Industry Sector", "MARA", "MBRSH", "Industry Sector", "CHAR", "1", "Y"]
+        rules_frame = pd.read_excel(io.BytesIO(rules), dtype=str, keep_default_na=False)
+        rules_frame.loc[len(rules_frame)] = ["MBRSH", "Industry Sector", "Y", "Industry Sector If OIL then O", "Blank"]
+        res = convert_files(
+            xlsx(source.values.tolist(), source.columns.tolist()),
+            xlsx(mapping_frame.values.tolist(), mapping_frame.columns.tolist()),
+            xlsx(rules_frame.values.tolist(), rules_frame.columns.tolist()),
+            llm=FakeLLM(),
+        )
+        workbook = self.sheets(res)["CONVERTED_DATA"]
+        self.assertEqual(workbook["MBRSH"].tolist(), ["O", "O", "O"])
+        self.assertNotIn("MBRSH", [item["field"] for item in res.human_needed])
+
+    def test_unresolved_correction_is_not_claimed_as_applied(self):
+        res = convert_files(*inputs(), llm=FakeLLM(), correction_text="Can this warning be ignored?")
+        self.assertFalse(res.summary["correction_applied"])
+        self.assertIn("specify", res.summary["correction_message"])
+
+    def test_llm_cannot_target_material_not_named_by_user(self):
+        llm = FakeLLM(correction_response={"updates": [
+            {"field": "BESKZ", "value": "E", "material": "A3"}], "message": "Updated."})
+        res = convert_files(*inputs(), llm=llm, correction_text="Set procurement type to E for the gauge")
+        self.assertFalse(res.summary["correction_applied"])
+        self.assertEqual(self.sheets(res)["CONVERTED_DATA"]["BESKZ"][2], "0")
 
     def test_second_run_uses_cache(self):
         llm = FakeLLM()
@@ -132,9 +218,11 @@ class ServiceTests(unittest.TestCase):
 
     def test_job_store_evicts_oldest(self):
         js = JobStore(limit=2)
-        ids = [js.put(b"x") for _ in range(3)]
+        ids = [js.put(b"x", [{"MATNR": str(i)}], [], []) for i in range(3)]
         self.assertIsNone(js.get(ids[0]))
+        self.assertIsNone(js.get_s4_records(ids[0]))
         self.assertEqual(js.get(ids[2]), b"x")
+        self.assertEqual(js.get_s4_records(ids[2]), ([{"MATNR": "2"}], [], {}))
 
 
 if __name__ == "__main__":

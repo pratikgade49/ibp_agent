@@ -71,7 +71,8 @@ def validate_rule(rule: dict, known_fields: set) -> list:
 def _ask_llm(llm, row, field_desc, known):
     user = (f"SAP_FIELD: {row['SAP Field']}\nDescription: {row['SAP Description']}\n"
             f"Mandatory: {row['Mandatory']}\nData List text: {row['Data List']!r}\nFlag-if text: {row['Flag if']!r}\n"
-            f"Available SAP fields: {json.dumps(field_desc)}")
+            f"Available SAP fields: {json.dumps(field_desc)}\n"
+            f"If a simple 'If SOURCE then TARGET' statement does not name a different source field, treat it as a mapping on {row['SAP Field']} itself.")
     last = ""
     for _ in range(2):  # one retry with the validation error fed back
         try:
@@ -88,6 +89,20 @@ def _ask_llm(llm, row, field_desc, known):
     return None, last
 
 
+def _self_value_branches(text, field, other_field_desc):
+    if re.search(r"\bif\s+[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)+\s+then\b", text, re.IGNORECASE):
+        return []
+    if any(re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE)
+           for name in other_field_desc if name and len(name) > 2):
+        return []
+    return [
+        {"if": {field: source}, "then": target}
+        for source, target in re.findall(
+            r"\bif\s+([A-Za-z0-9_.-]+)\s+then\s+([A-Za-z0-9_.-]+)", text, re.IGNORECASE
+        )
+    ]
+
+
 def compile_rules(ruleset, mapping, llm, cache: dict, min_conf: float):
     """Returns (entries_by_field, stats, warnings). `cache` is mutated with new AI results."""
     field_desc = dict(zip(ruleset["SAP Field"], ruleset["SAP Description"]))
@@ -102,12 +117,19 @@ def compile_rules(ruleset, mapping, llm, cache: dict, min_conf: float):
         if row["Mandatory"].upper() == "Y":
             base.append({"type": "not_blank", "field": f})
         dl, fl = row["Data List"], row["Flag if"]
-        if dl and SIMPLE_LIST.match(dl):
+        other_descriptions = [
+            str(description) for other_field, description in field_desc.items() if other_field != f
+        ]
+        self_branches = _self_value_branches(dl, f, [*field_desc.keys(), *other_descriptions]) if dl else []
+        if self_branches:
+            base.append({"type": "conditional_set", "field": f, "mode": "set", "branches": self_branches})
+        elif dl and SIMPLE_LIST.match(dl):
             base.append({"type": "in_list", "field": f, "values": [v.strip() for v in dl.split(",")]})
         entry = {"status": "approved", "confidence": 1.0, "readback": "", "notes": [],
                  "source_text": {"Mandatory": row["Mandatory"], "Data List": dl, "Flag if": fl}, "rules": list(base)}
-        if (dl and not SIMPLE_LIST.match(dl)) or (fl and fl.lower() != "blank"):
-            key = hashlib.sha1("|".join([f, row["Mandatory"], dl, fl, sig]).encode()).hexdigest()
+        needs_ai = (dl and not SIMPLE_LIST.match(dl) and not self_branches) or (fl and fl.lower() != "blank")
+        if needs_ai:
+            key = hashlib.sha1("|".join(["rule-compiler-v2", f, row["Mandatory"], dl, fl, sig]).encode()).hexdigest()
             ai = cache.get(key)
             if ai:
                 stats["cached"] += 1

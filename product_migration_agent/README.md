@@ -8,6 +8,29 @@ Three `.xlsx` uploads: **data** (Oracle product master), **mapping** (Oracle fie
 and **rules** (SAP Field, SAP Description, Mandatory, Data List, Flag if). Output: one Excel workbook with
 MARA / MAKT / MARC / MBEW load sheets, MATERIAL_STATUS, ISSUES, CHANGE_LOG, AI_RULE_DECISIONS, AI_VALUE_DECISIONS, SUMMARY.
 
+## Automatic S/4 OData field matching
+The mapping workbook only needs the Oracle source field to SAP technical field columns used for conversion. No
+S/4 API entity, property, or navigation columns are needed. When products are pushed, the service fetches the live
+`API_PRODUCT_SRV` `$metadata`, asks the LLM to match each populated Oracle source field to an available S/4 target,
+and validates every returned entity/property/navigation tuple against that metadata before any create request.
+The Oracle field name is the primary clue; the SAP technical field and description provide context. Unmapped or
+invalid targets block the push and are reported as an upload error. Mapping choices are not displayed in the UI.
+
+Source `MATNR` identifies and groups input rows; it must **not** map to `A_Product` / `Product`. For internal number
+assignment, the root POST sends `"Product": ""` and SAP generates the key. The generated key is returned in the
+upload result when SAP includes it in the response. Required properties are determined from live metadata
+(`Nullable="false"` and entity keys), rather than a hard-coded list such as `ProductType`.
+
+SAP requires a description in the root create request. It is deep-inserted under `to_Description` using the OData V2
+`results` collection. Both root and description `Product` values are empty to trigger internal number assignment;
+`Language` and `ProductDescription` are included. Other direct-child entities (such as plant and valuation) are
+created afterward with separate POST requests to the generated Product's navigation URL. Their request bodies include
+the SAP-generated `Product` and required child keys such as `Plant`. A related-entity failure is reported as a partial
+product creation. Only direct navigations exposed by the live `A_Product` metadata are supported.
+When source values are absent, product creation defaults `IndustrySector` to `M`, `IsMarkedForDeletion` to `false`,
+and the description language to `EN` (`MIGRATION_DEFAULT_API_LANGUAGE` can override the language). A mapped source
+value takes precedence. `CreationDate` is system-maintained/non-creatable and is intentionally omitted from the POST.
+
 ## How the AI is used (and where it is not)
 1. `rules.py` - plain code handles Mandatory=Y and simple value lists. The LLM is called only for free-text rules
    and returns JSON in a fixed vocabulary (`not_blank, in_list, conditional_set, max_length, compare_fields, regex`).
@@ -26,11 +49,12 @@ there (text in, text out, no tools) and the four providers now omit the tools ar
 ## API
 - `POST /migration/convert` multipart: `data`, `mapping`, `rules`, optional `min_confidence`
   -> `{job_id, summary, human_needed, download_url}` (400 for bad input, 502 for provider failure)
+- `POST /migration/push/{job_id}` -> automatically map populated Oracle fields against live S/4 metadata, validate the result, and create ready products
 - `GET /migration/download/{job_id}` -> the workbook (kept in memory, last 20 jobs)
 
 ## Settings (env, all optional)
 `MIGRATION_MIN_CONFIDENCE`, `MIGRATION_CACHE_DIR`, `MIGRATION_MAX_UPLOAD_MB` (20), `MIGRATION_MAX_ROWS` (200000),
-`MIGRATION_DEFAULT_LANGUAGE` (E, for MAKT-SPRAS). Key fields missing from the mapping file are set in `config.py`
+`MIGRATION_DEFAULT_LANGUAGE` (E, legacy SAP language key), `MIGRATION_DEFAULT_API_LANGUAGE` (EN). Key fields missing from the mapping file are set in `config.py`
 (`MAKT-SPRAS` constant, `MBEW-BWKEY` = plant).
 
 ## Tests

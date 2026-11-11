@@ -32,7 +32,7 @@ def to_sap_frame(src: pd.DataFrame, mapping: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({r["SAP Field"]: src[r["Oracle Field"]].values for _, r in mapping.iterrows()})
 
 
-def convert(src: pd.DataFrame, mapping: pd.DataFrame, entries: dict, maps: dict):
+def convert(src: pd.DataFrame, mapping: pd.DataFrame, entries: dict, maps: dict, corrections=None):
     df = to_sap_frame(src, mapping)
     issues, changes, blank_ok = [], [], set()
     key = config.KEY_FIELD
@@ -57,11 +57,24 @@ def convert(src: pd.DataFrame, mapping: pd.DataFrame, entries: dict, maps: dict)
             elif v not in targets:
                 issue(i, field, "value_map", "ERROR", f"no translation for source value {v!r}")
 
+    corrected = set()
+    for correction in corrections or []:
+        field, value, material = correction["field"], correction["value"], correction["material"]
+        indices = df.index if material is None else df.index[df[key].astype(str) == material]
+        for i in indices:
+            corrected.add((i, field))
+            if df.at[i, field] != value:
+                change(i, field, value, "chat_correction")
+    if corrected:
+        issues = [item for item in issues if (item["source_row"] - 2, item["field"]) not in corrected]
+
     flat = [(f, r) for f, e in entries.items() for r in e["rules"] if r["field"] in df.columns]
     for f, r in flat:                                               # 2. derive rules (ruleset order)
         if r["type"] != "conditional_set":
             continue
         for i in df.index:
+            if (i, r["field"]) in corrected and r.get("mode", "set") != "flag":
+                continue
             row = df.loc[i]
             for b in r["branches"]:
                 if _match(row, b["if"]):

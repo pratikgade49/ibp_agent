@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react';
-import { ArrowLeft, Download, FileSpreadsheet, Loader2, MessageSquareText, Send, Upload } from 'lucide-react';
+import { ArrowLeft, CloudUpload, Download, FileSpreadsheet, Loader2, MessageSquareText, Send, Upload } from 'lucide-react';
 import './product-migration.css';
 
 interface Summary {
@@ -12,6 +12,8 @@ interface Summary {
   rules_from_cache: number;
   human_decisions_needed: number;
   warnings: string[];
+  correction_applied?: boolean;
+  correction_message?: string;
 }
 
 interface HumanItem {
@@ -20,8 +22,16 @@ interface HumanItem {
   detail: string;
 }
 
+interface PreviewIssue {
+  field: string;
+  rule: string;
+  severity: string;
+  message: string;
+}
+
 interface PreviewRow {
-  [key: string]: string;
+  [key: string]: string | PreviewIssue[] | undefined;
+  _row_issues?: PreviewIssue[];
 }
 
 interface ConvertResponse {
@@ -30,6 +40,29 @@ interface ConvertResponse {
   human_needed: HumanItem[];
   download_url: string;
   preview: PreviewRow[];
+}
+
+interface PushItem {
+  material: string;
+  source_material?: string;
+  product_id?: string | null;
+  status: string;
+  error?: string;
+  http_status?: number;
+  method?: string;
+  endpoint?: string;
+  fields?: string[];
+  related_results?: { entity: string; key?: string; status: string; error?: string; http_status?: number }[];
+}
+
+interface PushResponse {
+  status: string;
+  created: number;
+  partial: number;
+  already_exists: number;
+  skipped_with_errors: number;
+  failed: number;
+  results: PushItem[];
 }
 
 interface ChatMessage {
@@ -44,7 +77,7 @@ interface ProductMigrationProps {
 
 const SLOTS = [
   { key: 'data', label: 'Data', hint: 'Oracle product master (.xlsx)' },
-  { key: 'mapping', label: 'Mapping', hint: 'Oracle to S/4 field mapping (.xlsx)' },
+  { key: 'mapping', label: 'Mapping', hint: 'Oracle to SAP field mapping (.xlsx)' },
   { key: 'rules', label: 'Rules', hint: 'Validation and derivation rules (.xlsx)' },
 ] as const;
 
@@ -55,6 +88,8 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<ConvertResponse | null>(null);
+  const [pushResult, setPushResult] = useState<PushResponse | null>(null);
+  const [pushing, setPushing] = useState(false);
   const [correction, setCorrection] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([
     { id: 'welcome', role: 'assistant', text: 'Upload the input files and I will convert them. If you want to override warnings, type a correction like “set BESKZ to E”.' },
@@ -79,10 +114,13 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
       if (!response.ok) throw new Error(payload.detail || `Conversion failed (${response.status}).`);
       const parsed = payload as ConvertResponse;
       setResult(parsed);
+      setPushResult(null);
       setMessages((current) => [...current, {
         id: crypto.randomUUID(),
         role: 'assistant',
-        text: correctionText ? `Applied: “${correctionText}”. Updated workbook is ready.` : 'Conversion finished. Review the preview and download the Excel file.',
+        text: correctionText
+          ? (parsed.summary.correction_message || (parsed.summary.correction_applied ? 'Correction applied. Updated workbook is ready.' : 'No correction was applied.'))
+          : 'Conversion finished. Review the preview and download the Excel file.',
       }]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Conversion failed.');
@@ -107,7 +145,30 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
     await runConversion(value);
   }
 
-  const columns = result?.preview?.[0] ? Object.keys(result.preview[0]) : [];
+  async function pushToS4() {
+    if (!result || pushing || result.summary.ready === 0) return;
+    const confirmed = window.confirm(
+      `Create ${result.summary.ready} ready product(s) in S/4HANA? SAP will generate each Product number; source MATNR will not be used as the S/4 Product key. Retrying can create duplicates.`,
+    );
+    if (!confirmed) return;
+    setPushing(true);
+    setPushResult(null);
+    setError('');
+    try {
+      const response = await fetch(`/migration/push/${result.job_id}`, {
+        method: 'POST',
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `S/4 upload failed (${response.status}).`);
+      setPushResult(payload as PushResponse);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'S/4 upload failed.');
+    } finally {
+      setPushing(false);
+    }
+  }
+
+  const columns = result?.preview?.[0] ? Object.keys(result.preview[0]).filter((column) => column !== '_row_issues') : [];
 
   return (
     <main className="pm-shell">
@@ -119,7 +180,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
 
       <section className="pm-layout">
         <h1>Convert Oracle product master to S/4HANA.</h1>
-        <p className="pm-lede">Upload the data, mapping and rules. After the workbook is generated, you can correct warnings in the chat and regenerate the updated Excel immediately.</p>
+        <p className="pm-lede">Upload the data, mapping and rules. S/4 fields are matched automatically against the live service metadata.</p>
 
         <form className="pm-form" onSubmit={submit}>
           {SLOTS.map((slot) => (
@@ -151,7 +212,34 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
 
             <div className="pm-content-grid">
               <div className="pm-panel">
-                <a className="pm-download" href={result.download_url} download><Download size={16} /> Download Excel</a>
+                <div className="pm-result-actions">
+                  <a className="pm-download" href={result.download_url} download><Download size={16} /> Download Excel</a>
+                  <button type="button" className="pm-run pm-push" onClick={() => void pushToS4()} disabled={pushing || !!pushResult || result.summary.ready === 0}>
+                    {pushing ? <><Loader2 size={16} className="pm-spin" /> Sending...</> : <><CloudUpload size={16} /> Create ready products in S/4</>}
+                  </button>
+                </div>
+
+                {pushResult && (
+                  <div className="pm-push-result" role="status">
+                    <strong>S/4 upload: {pushResult.created} created, {pushResult.partial} partially created, {pushResult.skipped_with_errors} skipped for conversion errors, {pushResult.failed} failed or partial. SAP-generated keys are not checked against source MATNR.</strong>
+                    {pushResult.results.some((item) => item.status !== 'created' || item.related_results?.some((related) => related.status === 'failed')) && (
+                      <ul>{pushResult.results.filter((item) => item.status !== 'created' || item.related_results?.some((related) => related.status === 'failed')).map((item) => (
+                        <li key={item.material}><code>{item.material}</code> {item.status}{item.http_status ? ` (HTTP ${item.http_status})` : ''}{item.method && item.endpoint ? ` via ${item.method} ${item.endpoint}` : ''}{item.error ? `: ${item.error}` : ''}{item.related_results?.filter((related) => related.status === 'failed').map((related) => `; ${related.entity}${related.key ? ` ${related.key}` : ''}: ${related.error || `HTTP ${related.http_status}`}`)}</li>
+                      ))}</ul>
+                    )}
+                    {pushResult.results.some((item) => item.status === 'created') && (
+                      <details className="pm-created-products">
+                        <summary>View SAP-generated Product numbers</summary>
+                        <ul>{pushResult.results.filter((item) => item.status === 'created').map((item, index) => (
+                          <li key={`${item.source_material || item.material}-${index}`}>
+                            Source MATNR <code>{item.source_material || 'not returned'}</code>
+                            {' -> '}S/4 Product <code>{item.product_id || 'created; ID not included in SAP response'}</code>
+                          </li>
+                        ))}</ul>
+                      </details>
+                    )}
+                  </div>
+                )}
 
                 {result.human_needed.length > 0 ? (
                   <div className="pm-human">
@@ -176,8 +264,23 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                         </thead>
                         <tbody>
                           {result.preview.map((row, index) => (
-                            <tr key={`${index}-${Object.values(row).join('-')}`}>
-                              {columns.map((column) => <td key={`${column}-${index}`}>{row[column] ?? ''}</td>)}
+                            <tr
+                              key={`${index}-${String(row.MATNR ?? index)}`}
+                              className={row._row_issues?.some((issue) => issue.severity === 'ERROR')
+                                ? 'pm-row-error'
+                                : row._row_issues?.some((issue) => issue.severity === 'WARN') ? 'pm-row-warning' : undefined}
+                            >
+                              {columns.map((column) => <td key={`${column}-${index}`}>{typeof row[column] === 'string' ? row[column] : ''}</td>)}
+                              <td className="pm-issues-cell">
+                                {row._row_issues?.length ? (
+                                  <ul>{row._row_issues.map((issue, issueIndex) => (
+                                    <li key={`${issue.field}-${issue.rule}-${issueIndex}`}>
+                                      <strong className={`pm-issue-${issue.severity.toLowerCase()}`}>{issue.severity}</strong>{' '}
+                                      <code>{issue.field}</code>: {issue.message}
+                                    </li>
+                                  ))}</ul>
+                                ) : <span className="pm-no-issues">None</span>}
+                              </td>
                             </tr>
                           ))}
                         </tbody>
