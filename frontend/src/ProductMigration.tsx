@@ -1,6 +1,7 @@
 import { FormEvent, useState } from 'react';
 import { ArrowLeft, CloudUpload, Download, FileSpreadsheet, Loader2, MessageSquareText, Send, Upload } from 'lucide-react';
 import './product-migration.css';
+import GenieMascot from './GenieMascot';
 
 interface Summary {
   records: number;
@@ -308,7 +309,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                     </div>
                   ))}
                 </div>
-                <div className="pm-chat-composer">
+                <div className="genie-composer-row"><GenieMascot /><div className="pm-chat-composer">
                   <textarea
                     value={correction}
                     onChange={(e) => setCorrection(e.target.value)}
@@ -318,7 +319,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                   <button type="button" className="pm-run" onClick={() => void applyCorrection()} disabled={loading || !correction.trim()}>
                     <Send size={15} /> Apply
                   </button>
-                </div>
+                </div></div>
               </aside>
             </div>
           </section>

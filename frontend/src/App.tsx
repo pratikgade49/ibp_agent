@@ -38,6 +38,7 @@ import {
 import type { AskResponse, ChatMessage, Conversation, DataRecord, Insight } from './types';
 import ScenarioTestAgent from './ScenarioTestAgent';
 import ProductMigration from './ProductMigration';
+import GenieMascot from './GenieMascot';
 
 const STORAGE_KEY = 'ibp-demand-desk-conversations-v1';
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -1127,7 +1128,7 @@ export default function App() {
           </div>
           {error && <div className="request-error" role="alert">{error}</div>}
           <div className="composer-area">
-            <form className="composer" onSubmit={handleSubmit}>
+            <div className="genie-composer-row"><GenieMascot /><form className="composer" onSubmit={handleSubmit}>
               <textarea
                 id="message-input"
                 value={question}
@@ -1139,7 +1140,7 @@ export default function App() {
                 disabled={loading}
               />
               <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
-            </form>
+            </form></div>
             <p className="privacy-note">{agentMode === 'maintenance' ? 'Read-only S/4 maintenance schedule data.' : agentMode === 's4' ? 'Read-only S/4 capacity data.' : 'Analysis is based on available planning data.'}</p>
           </div>
         </aside>

@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowUpRight, Layers3, MessageSquarePlus, Send } from 'lucid
 import type { ChatMessage } from './types';
 import ScenarioForecastPreview from './ScenarioForecastPreview';
 import './scenario-test-agent.css';
+import GenieMascot from './GenieMascot';
 
 interface ScenarioTestAgentProps {
   messages: ChatMessage[];
@@ -89,7 +90,7 @@ export default function ScenarioTestAgent({
             {loading && <div className="scenario-thinking"><i /><i /><i /> Checking scenario inputs</div>}
           </div>
           {error && <p className="scenario-error" role="alert">{error}</p>}
-          <form className="scenario-composer" onSubmit={handleSubmit}>
+          <div className="genie-composer-row scenario-composer-row"><GenieMascot /><form className="scenario-composer" onSubmit={handleSubmit}>
             <textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -102,7 +103,7 @@ export default function ScenarioTestAgent({
               <span>Version and scenario IDs are used for read and write</span>
               <button type="submit" aria-label="Send request" disabled={!draft.trim() || loading}><Send size={16} /></button>
             </div>
-          </form>
+          </form></div>
         </section>
         <footer className="scenario-agent-footer"><span>IBP connection: separate scenario-agent credentials</span><span>Writes require the exact approval phrase</span></footer>
       </section>

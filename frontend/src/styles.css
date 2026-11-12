@@ -322,3 +322,14 @@ tbody tr:hover { background: #fafcfb; }
   .directory-footer { align-items: flex-start; flex-direction: column; margin-top: 18px; }
   .directory-return-button { font-size: 0; width: 34px; padding: 0; }
 }
+
+/* Keep the decorative mascot beside the input and out of the way of controls. */
+.genie-composer-row { position: relative; min-width: 0; }
+.genie-composer-row > .genie-mascot { position: absolute; right: calc(100% + 8px); bottom: 0; z-index: 2; }
+.scenario-chat-window { overflow: visible; }
+.genie-mascot { position: relative; display: block; flex: 0 0 62px; width: 62px; height: 78px; pointer-events: none; }
+.genie-mascot::before { content: ''; position: absolute; left: 14%; right: 14%; bottom: 3px; height: 8px; border-radius: 50%; background: rgba(19,48,83,.2); filter: blur(4px); }
+.genie-mascot img { display: block; width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 5px 4px rgba(14,39,69,.25)); animation: genie-float 3s ease-in-out infinite; }
+@keyframes genie-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+@media (max-width: 600px) { .genie-mascot { width: 48px; height: 64px; } .genie-composer-row > .genie-mascot { right: auto; left: 0; bottom: calc(100% + 4px); } }
+@media (prefers-reduced-motion: reduce) { .genie-mascot img { animation: none; } }
