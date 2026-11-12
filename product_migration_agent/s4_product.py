@@ -619,6 +619,15 @@ def push_products(records: list[dict], error_materials: set[str] | None = None,
     if metadata.get("root_creatable") is False:
         raise ValueError(f"S/4 metadata marks {ROOT_ENTITY_SET} as non-creatable")
     field_map = _map_source_fields(field_map or [], records, metadata, llm)
+    # WERKS identifies the plant; do not depend on a model guessing this key.
+    if any(row.get("DISLS") not in (None, "") for row in records):
+        plant_target = next((option for option in metadata["target_options"] if option["navigation"] == "to_Plant" and option["property"] == "Plant"), None)
+        plant_source = next((item for item in (field_map or []) if item.get("field") == "WERKS"), None)
+        if plant_target and any(row.get("WERKS") not in (None, "") for row in records):
+            field_map = [item for item in field_map if item.get("field") != "WERKS"]
+            field_map.append({"field": "WERKS", "oracle_field": (plant_source or {}).get("oracle_field", ""), **plant_target})
+    # DISLS is sent to the nested supply-planning entity below, not a guessed direct target.
+    field_map = [item for item in field_map if item.get("field") != "DISLS"]
     validated_map = _validate_field_map(field_map, records, metadata)
 
     entity_response = session.get(
@@ -664,6 +673,20 @@ def push_products(records: list[dict], error_materials: set[str] | None = None,
                         root_payload[navigation] = {"results": [child_payload]}
                     else:
                         child_payloads.append((navigation, child_payload))
+            # Supply-planning data must accompany the plant create request.
+            lot_size = material_rows[0].get("DISLS")
+            if lot_size not in (None, ""):
+                plant = next((payload for nav, payload in child_payloads if nav == "to_Plant"), None)
+                if plant is None or not plant.get("Plant"):
+                    raise ValueError("Lot sizing requires a mapped Plant for supply planning")
+                plant_entity = metadata["root_navigations"].get("to_Plant")
+                plant_type = metadata["entity_types"].get(metadata["entity_sets"].get(plant_entity), {})
+                if "to_ProductSupplyPlanning" not in plant_type.get("navigations", {}):
+                    raise ValueError("Plant supply-planning navigation is absent from S/4 metadata")
+                plant["to_ProductSupplyPlanning"] = {
+                    "Plant": plant["Plant"], "LotSizingProcedure": str(lot_size).strip(),
+                    **{key: plant[key] for key in ("MRPType", "MRPResponsible", "ProcurementType") if key in plant},
+                }
             if "to_Description" not in root_payload:
                 raise ValueError(
                     "S/4 requires a product description during product creation; map a populated source field to ProductDescription"
@@ -714,15 +737,18 @@ def push_products(records: list[dict], error_materials: set[str] | None = None,
             escaped_id = quote(generated_id.replace("'", "''"), safe="")
             for navigation, child_payload in child_payloads:
                 child_payload[ROOT_KEY_PROPERTY] = generated_id
+                if navigation == "to_Plant" and "to_ProductSupplyPlanning" in child_payload:
+                    child_payload["to_ProductSupplyPlanning"][ROOT_KEY_PROPERTY] = generated_id
                 child_url = f"{root_url}/{ROOT_ENTITY_SET}('{escaped_id}')/{navigation}"
                 child_response = session.post(child_url, json=child_payload, **write_options)
                 related_results.append({
                     "entity": navigation,
                     "status": "created" if child_response.ok else "failed",
-                    **({} if child_response.ok else {
-                        "http_status": child_response.status_code,
-                        "error": _response_error(child_response),
-                    }),
+                    "http_status": child_response.status_code,
+                    "method": "POST",
+                    "endpoint": f"{PRODUCT_SERVICE_ROOT}/{ROOT_ENTITY_SET}('{escaped_id}')/{navigation}",
+                    "included_deep_entities": ["to_ProductSupplyPlanning"] if "to_ProductSupplyPlanning" in child_payload else [],
+                    **({} if child_response.ok else {"error": _response_error(child_response)}),
                 })
         elif child_payloads:
             related_results.extend({
@@ -735,6 +761,8 @@ def push_products(records: list[dict], error_materials: set[str] | None = None,
             "source_material": material,
             "material": generated_id or material,
             "product_id": generated_id,
+            "root_http_status": create_response.status_code,
+            "root_included_deep_entities": ["to_Description"],
             "status": "created_with_errors" if has_related_errors else "created",
             **({"related_results": related_results} if related_results else {}),
         })

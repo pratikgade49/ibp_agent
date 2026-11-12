@@ -52,7 +52,9 @@ interface PushItem {
   method?: string;
   endpoint?: string;
   fields?: string[];
-  related_results?: { entity: string; key?: string; status: string; error?: string; http_status?: number }[];
+  root_http_status?: number;
+  root_included_deep_entities?: string[];
+  related_results?: { entity: string; status: string; error?: string; http_status?: number; method?: string; endpoint?: string; included_deep_entities?: string[] }[];
 }
 
 interface PushResponse {
@@ -221,23 +223,29 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
 
                 {pushResult && (
                   <div className="pm-push-result" role="status">
-                    <strong>S/4 upload: {pushResult.created} created, {pushResult.partial} partially created, {pushResult.skipped_with_errors} skipped for conversion errors, {pushResult.failed} failed or partial. SAP-generated keys are not checked against source MATNR.</strong>
-                    {pushResult.results.some((item) => item.status !== 'created' || item.related_results?.some((related) => related.status === 'failed')) && (
-                      <ul>{pushResult.results.filter((item) => item.status !== 'created' || item.related_results?.some((related) => related.status === 'failed')).map((item) => (
-                        <li key={item.material}><code>{item.material}</code> {item.status}{item.http_status ? ` (HTTP ${item.http_status})` : ''}{item.method && item.endpoint ? ` via ${item.method} ${item.endpoint}` : ''}{item.error ? `: ${item.error}` : ''}{item.related_results?.filter((related) => related.status === 'failed').map((related) => `; ${related.entity}${related.key ? ` ${related.key}` : ''}: ${related.error || `HTTP ${related.http_status}`}`)}</li>
-                      ))}</ul>
-                    )}
-                    {pushResult.results.some((item) => item.status === 'created') && (
-                      <details className="pm-created-products">
-                        <summary>View SAP-generated Product numbers</summary>
-                        <ul>{pushResult.results.filter((item) => item.status === 'created').map((item, index) => (
-                          <li key={`${item.source_material || item.material}-${index}`}>
-                            Source MATNR <code>{item.source_material || 'not returned'}</code>
-                            {' -> '}S/4 Product <code>{item.product_id || 'created; ID not included in SAP response'}</code>
+                    <strong>S/4 upload: {pushResult.created} created, {pushResult.partial} partially created, {pushResult.skipped_with_errors} skipped for conversion errors, {pushResult.failed} failed.</strong>
+                    <ul>{pushResult.results.map((item, index) => (
+                      <li key={`${item.source_material || item.material}-${index}`}>
+                        <strong>Source MATNR: {item.source_material || item.material}</strong>
+                        {item.product_id && <> → S/4 Product: <code>{item.product_id}</code></>}
+                        <ul>
+                          <li>
+                            Main product: {item.status === 'created' || item.status === 'created_with_errors' ? 'created' : item.status.replace(/_/g, ' ')}
+                            {item.root_http_status ? ` (HTTP ${item.root_http_status})` : item.http_status ? ` (HTTP ${item.http_status})` : ''}
+                            {item.error ? `: ${item.error}` : ''}
+                            {item.root_included_deep_entities?.length ? `; included in root request: ${item.root_included_deep_entities.join(', ')}` : ''}
                           </li>
-                        ))}</ul>
-                      </details>
-                    )}
+                          {item.related_results?.map((related, childIndex) => (
+                            <li key={`${related.entity}-${childIndex}`}>
+                              {related.entity}: {related.status}{related.http_status ? ` (HTTP ${related.http_status})` : ''}
+                              {related.error ? `: ${related.error}` : ''}
+                              {related.included_deep_entities?.length ? `; included in this request: ${related.included_deep_entities.join(', ')}` : ''}
+                            </li>
+                          ))}
+                        </ul>
+                      </li>
+                    ))}</ul>
+                    <p>Included nested entities share the parent request result; their individual status is not separately confirmed.</p>
                   </div>
                 )}
 

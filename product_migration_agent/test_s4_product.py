@@ -150,6 +150,21 @@ class S4ProductTests(unittest.TestCase):
         self.addCleanup(llm_patch.stop)
 
     @patch("product_migration_agent.s4_product._s4_request_config", return_value=("https://s4.example", {"timeout": 2}))
+    def test_plant_lot_size_is_sent_in_nested_supply_planning(self, _request_config):
+        session = FakeSession()
+        metadata = METADATA.replace(
+            b'<Property Name="ProcurementType" Type="Edm.String"/>',
+            b'<Property Name="ProcurementType" Type="Edm.String"/><NavigationProperty Name="to_ProductSupplyPlanning" Relationship="API_PRODUCT_SRV.SupplyAssoc" ToRole="Supply"/>',
+        )
+        row = {"MATNR": "P-1", "MAKTX": "Pump", "WERKS": "PL01", "DISLS": "EX", "DISMM": "PD", "BESKZ": "F"}
+        llm = FakeMetadataLLM(skipped_fields={"DISLS"})  # Model chooses valuation for WERKS; plant mapping must still be correct.
+        with patch.object(session, "get", side_effect=lambda url, **kw: FakeResponse(200, headers={"x-csrf-token": "csrf-test"}, content=metadata) if url.endswith("/$metadata") else FakeResponse(200)):
+            with patch("product_migration_agent.s4_product.requests.Session", return_value=session):
+                result = s4_product.push_products([row], field_map=field_map_for(row), llm=llm)
+        self.assertEqual(result["created"], 1)
+        plant = session.post_calls[1][1]["json"]
+        self.assertEqual(plant["to_ProductSupplyPlanning"], {"Product": "900001", "Plant": "PL01", "LotSizingProcedure": "EX", "MRPType": "PD", "ProcurementType": "F"})
+    @patch("product_migration_agent.s4_product._s4_request_config", return_value=("https://s4.example", {"timeout": 2}))
     def test_creates_product_with_required_description_and_csrf(self, _request_config):
         session = FakeSession()
         row = {
