@@ -14,6 +14,7 @@ import re
 import statistics
 import uuid
 import xml.etree.ElementTree as ET
+from decimal import Decimal, InvalidOperation
 import math
 from datetime import datetime, timezone
 from typing import Optional
@@ -281,6 +282,40 @@ def update_planning_data(
     return _ibp_write(transaction_payload)
 
 
+def _serialize_master_data_decimals(metadata: bytes, master_data_type: str, records: list[dict]) -> list[dict]:
+    """Serialize decimal properties using live OData V2 metadata."""
+    try:
+        root = ET.fromstring(metadata)
+    except ET.ParseError as exc:
+        raise ValueError("Cannot write master data: invalid service metadata") from exc
+    entities = [n for n in root.iter() if n.tag.rsplit("}", 1)[-1] == "EntityType"]
+    entity = next((n for n in entities if n.get("Name") == master_data_type), None)
+    if entity is None:
+        entity_set = next((n for n in root.iter() if n.tag.rsplit("}", 1)[-1] == "EntitySet" and n.get("Name") == master_data_type), None)
+        type_name = (entity_set.get("EntityType") or "").rsplit(".", 1)[-1] if entity_set is not None else ""
+        entity = next((n for n in entities if n.get("Name") == type_name), None)
+    if entity is None:
+        raise ValueError(f"Cannot write master data: {master_data_type} missing from metadata")
+    decimals = {n.get("Name") for n in entity if n.tag.rsplit("}", 1)[-1] == "Property" and n.get("Type") == "Edm.Decimal"}
+    result = []
+    for record in records:
+        row = dict(record)
+        for name in decimals.intersection(row):
+            value = row[name]
+            if value is None:
+                continue
+            try:
+                if isinstance(value, bool):
+                    raise ValueError("boolean is not a decimal")
+                number = Decimal(str(value))
+                if not number.is_finite():
+                    raise ValueError("decimal must be finite")
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f"Invalid decimal value for {name}") from exc
+            row[name] = format(number, "f")
+        result.append(row)
+    return result
+
 def _master_data_write(master_data_type: str, payload: dict) -> dict:
     """Import master-data records through the documented Trans entity."""
     service_root = f"{IBP_BASE_URL}{MASTER_DATA_SERVICE_ROOT}"
@@ -300,6 +335,11 @@ def _master_data_write(master_data_type: str, payload: dict) -> dict:
     csrf_token = token_response.headers.get("x-csrf-token")
     if not csrf_token:
         raise RuntimeError("SAP IBP did not return an x-csrf-token")
+    navigation = f"Nav{master_data_type}"
+    payload = dict(payload)
+    payload[navigation] = _serialize_master_data_decimals(
+        token_response.content, master_data_type, payload[navigation]
+    )
     response = session.post(
         transaction_url,
         json=payload,
