@@ -56,6 +56,7 @@ export default function ScenarioTestAgent({
       </header>
 
       <section className="scenario-chat-layout">
+        <div className="scenario-journey" aria-label="Scenario workflow"><span><b>01</b> Request forecast</span><i /><span><b>02</b> Review preview</span><i /><span><b>03</b> Approve import</span></div>
         <div className="scenario-chat-heading">
           <span className="scenario-kicker"><i /> SCENARIO TEST WORKSPACE</span>
           <h1>Test a customer-base scenario.</h1>

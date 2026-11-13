@@ -1,6 +1,8 @@
 import { FormEvent, useState } from 'react';
 import { ArrowLeft, CloudUpload, Download, FileSpreadsheet, Loader2, MessageSquareText, Send, Upload } from 'lucide-react';
 import './product-migration.css';
+import oracleLogo from './assets/oracle-logo.svg';
+import sapLogo from './assets/sap-logo.svg';
 import GenieMascot from './GenieMascot';
 
 interface Summary {
@@ -177,14 +179,36 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
     <main className="pm-shell">
       <header className="pm-topbar">
         <button type="button" className="pm-back" onClick={onShowAgents}><ArrowLeft size={16} /> All agents</button>
-        <div className="pm-brand"><FileSpreadsheet size={18} /><strong>Product Master Migration Agent</strong></div>
+        <div className="pm-brand"><FileSpreadsheet size={18} /><strong>Oracle to SAP-S4HANA Migration</strong></div>
         <span />
       </header>
 
       <section className="pm-layout">
-        <h1>Convert Oracle product master to S/4HANA.</h1>
-        <p className="pm-lede">Upload the data, mapping and rules. S/4 fields are matched automatically against the live service metadata.</p>
+        <div className="pm-hero">
+          <div className="pm-hero-copy">
+            <span className="pm-eyebrow">Oracle to SAP-S4HANA Migration</span>
+            <h1>Oracle to SAP-S4HANA Masterdata Migration Workbench</h1>
+            <p>transform your Master Data from Legacy Oracle DB to SAP S/4HANA with automated AI Infused Mapping and rule based Validation</p>
+          </div>
+          <div className="pm-flow" aria-label="Oracle product data flows through the migration agent to SAP S/4HANA">
+            <div className="pm-flow-brand"><img src={oracleLogo} alt="Oracle" /><span></span></div>
+            <div className="pm-flow-line"><i /><i /><i /></div>
+            <div className="pm-flow-agent"><FileSpreadsheet size={25} /><span>AI AGENT</span></div>
+            <div className="pm-flow-line"><i /><i /><i /></div>
+            <div className="pm-flow-brand pm-flow-sap"><img src={sapLogo} alt="SAP" /><strong>S/4HANA</strong><span></span></div>
+          </div>
+        </div>
 
+        <section className="pm-how" aria-label="How migration works">
+          <div className="pm-section-title"><div><span className="pm-eyebrow">THE JOURNEY</span><h2>How your migration works</h2></div><p>Clear steps. You stay in control.</p></div>
+          <ol className="pm-steps">
+            <li><span>01</span><FileSpreadsheet size={20} /><strong>Provide inputs</strong><p>Upload Oracle data, field mapping and rules as Excel files.</p></li>
+            <li><span>02</span><MessageSquareText size={20} /><strong>Interpret & translate</strong><p>The agent applies the mapping and interprets the supplied rules.</p></li>
+            <li><span>03</span><CloudUpload size={20} /><strong>Validate & review</strong><p>Review converted records, warnings and decisions needing your input.</p></li>
+            <li><span>04</span><Download size={20} /><strong>Download or create</strong><p>Download the workbook or choose to create ready products in S/4HANA.</p></li>
+          </ol>
+        </section>
+        <div className="pm-input-heading"><div><span className="pm-eyebrow">START A MIGRATION</span><h2>Prepare your files</h2><p>Upload the three Excel files to begin. S/4 fields are matched against live service metadata.</p></div><span className="pm-input-count">{SLOTS.filter((slot) => files[slot.key]).length} / 3 files added</span></div>
         <form className="pm-form" onSubmit={submit}>
           {SLOTS.map((slot) => (
             <label className={`pm-drop ${files[slot.key] ? 'filled' : ''}`} key={slot.key}>
@@ -198,7 +222,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
             </label>
           ))}
           <button type="submit" className="pm-run" disabled={!ready || loading}>
-            {loading ? <><Loader2 size={16} className="pm-spin" /> Converting...</> : 'Run conversion'}
+            {loading ? <><Loader2 size={16} className="pm-spin" /> Agent is converting your files...</> : 'Run conversion'}
           </button>
         </form>
 
@@ -269,7 +293,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                     <div className="pm-table-wrap">
                       <table>
                         <thead>
-                          <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
+                          <tr>{columns.map((column) => <th key={column}>{column}</th>)}<th>Issues</th></tr>
                         </thead>
                         <tbody>
                           {result.preview.map((row, index) => (

@@ -6,6 +6,7 @@ export default defineConfig(({ command }) => ({
   base: command === 'build' ? '/static/build/' : '/',
   server: {
     proxy: {
+      '/static': 'http://127.0.0.1:8080',
       '/ask': 'http://127.0.0.1:8080',
       '/s4': 'http://127.0.0.1:8080',
       '/customer-base': 'http://127.0.0.1:8080',

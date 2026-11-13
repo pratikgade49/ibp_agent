@@ -5,7 +5,6 @@ import yashLogo from './assets/Yash logo.jpg';
 import jouleLogo from './assets/sap-joule-logo.svg';
 import {
   Activity,
-  ArrowDown,
   ArrowRight,
   ArrowUpRight,
   Check,
@@ -91,7 +90,7 @@ const AGENTS: Array<{
   },
   {
     id: 'maintenance',
-    index: '03',
+    index: '04',
     name: 'S/4 Maintenance Planner',
     descriptor: 'Maintenance windows',
     description: 'Inspect scheduled maintenance calls and the production work centers they affect.',
@@ -101,7 +100,7 @@ const AGENTS: Array<{
   },
   {
     id: 'migration',
-    index: '04',
+    index: '05',
     name: 'Product Master Migration',
     descriptor: 'Oracle to S/4HANA conversion',
     description: 'Upload data, mapping and rules; the agent interprets the rules, translates codes and returns the converted Excel.',
@@ -946,10 +945,11 @@ export default function App() {
         </header>
         <main className="agent-directory">
           <section className="directory-intro">
+            <video className="directory-hero-video" autoPlay loop muted playsInline aria-hidden="true" preload="metadata"><source src="/static/315302.mp4" type="video/mp4" media="(prefers-reduced-motion: no-preference)" /></video>
             <div>
               <span className="directory-kicker"><span /> AGENT WORKSPACES <i /> SAP CONNECTED</span>
-              <h1>Choose your<br /><span>planning perspective.</span></h1>
-              <p>Five specialist agents. One connected planning workspace.</p>
+              <h1>Intelligence that moves<br /><span>planning forward.</span></h1>
+              <p>Five specialist agents. One connected workspace for better decisions.</p>
             </div>
             <div className="directory-network" aria-hidden="true">
               <div className="network-core"><Sparkles size={22} /></div>
@@ -962,19 +962,20 @@ export default function App() {
             </div>
           </section>
 
+          <div className="directory-section-heading"><div><span>YOUR AI WORKFORCE</span><h2>Choose the right specialist.</h2></div><p>Five agents, each built for a different planning task.</p></div>
           <section className="agent-directory-grid" aria-label="Available agent workspaces">
             {AGENTS.map((agent) => {
               const Icon = agent.icon;
               return (
                 <article className={`directory-agent-card ${agent.tone}`} key={agent.id}>
-                  <div className="directory-card-topline"><span>WORKSPACE {agent.index}</span><span className="directory-card-state"><i /> READY</span></div>
+                  <div className="directory-card-topline"><span>WORKSPACE {agent.index}</span><span className="directory-card-state">SPECIALIST AGENT</span></div>
                   <div className="directory-agent-icon"><Icon size={21} strokeWidth={1.8} /></div>
                   <span className="directory-agent-descriptor">{agent.descriptor}</span>
                   <h2>{agent.name}</h2>
                   <p>{agent.description}</p>
                   <ul>{agent.capabilities.map((capability) => <li key={capability}>{capability}</li>)}</ul>
                   <button type="button" className="directory-open-button" onClick={() => openAgent(agent.id)}>
-                    Open workspace <ArrowRight size={16} />
+                    {agent.id === 'migration' ? 'Start migration' : agent.id === 'scenario' ? 'Explore scenarios' : agent.id === 's4' ? 'Explore capacity' : agent.id === 'maintenance' ? 'Review maintenance' : 'Analyze demand'} <ArrowRight size={16} />
                   </button>
                 </article>
               );
@@ -1051,6 +1052,13 @@ export default function App() {
         </aside>
 
         <main className="analysis-workspace">
+          <section className="workspace-hero">
+            <div><span className="workspace-hero-kicker"><Sparkles size={14} /> YOUR AI PLANNING SPECIALIST</span>
+              <h2>{agentMode === 'maintenance' ? 'Make room for maintenance.' : agentMode === 's4' ? 'See capacity more clearly.' : 'Turn demand into direction.'}</h2>
+              <p>{agentMode === 'maintenance' ? 'Bring upcoming maintenance calls and their impact on production into view.' : agentMode === 's4' ? 'Explore work-center capacity and uncover potential bottlenecks in your chosen period.' : 'Explore forecast signals, investigate anomalies, and check the data behind your plan.'}</p>
+            </div>
+            <div className="workspace-hero-mark" aria-hidden="true">{agentMode === 'maintenance' ? <Wrench size={32} /> : agentMode === 's4' ? <Factory size={32} /> : <Activity size={32} />}</div>
+          </section>
           <div className="workspace-heading">
             <div>
               <div className="eyebrow"><span className="eyebrow-mark" /> Planning workspace</div>
@@ -1068,10 +1076,17 @@ export default function App() {
             {dashboardData ? (
               <Evidence data={dashboardData} />
             ) : (
-              <div className="dashboard-empty">
-                <div className="empty-graphic"><Activity size={23} /><span /><span /><span /></div>
-                <div><h3>{activeConversation ? 'No evidence in this conversation' : 'Your planning signals will appear here'}</h3><p>Ask the agent a question to populate this board with metrics, comparisons, and detailed results.</p></div>
-                {!activeConversation && <button onClick={() => document.getElementById('message-input')?.focus()}>Ask a question <ArrowDown size={14} /></button>}
+              <div className="dashboard-empty redesigned-empty">
+                <div className="empty-intro"><span className="empty-orbit"><Sparkles size={24} /></span><div><span className="empty-kicker">START WITH A QUESTION</span><h3>{activeConversation ? 'Explore another question' : 'What would you like to understand?'}</h3><p>Choose a starting point or ask your own question. Available evidence will appear here.</p></div></div>
+                <div className="empty-task-grid">
+                  {(agentMode === 'maintenance'
+                    ? [{ title: 'Upcoming calls', text: 'Review the next 30 days of scheduled maintenance.', prompt: 'Show scheduled maintenance calls in the next 30 days.' }, { title: 'Production impact', text: 'Find work centers linked to upcoming calls.', prompt: 'Which production work centers are affected by upcoming maintenance?' }, { title: 'A specific work center', text: 'Explore calls for a work center and date range.', prompt: 'Show maintenance calls for work center [work center] between YYYY-MM-DD and YYYY-MM-DD.' }]
+                    : agentMode === 's4'
+                      ? [{ title: 'Find bottlenecks', text: 'Ask about capacity constraints for a chosen period.', prompt: 'Is there a possibility of a capacity bottleneck for any resource from DD/MM/YYYY to DD/MM/YYYY?' }, { title: 'Work-center capacity', text: 'Explore the capacity configured for a work center.', prompt: 'Show the capacity setup for work center [work center].' }, { title: 'Shift intervals', text: 'Review work-center shift information.', prompt: 'Show the shift intervals for work center [work center].' }]
+                      : [{ title: 'Forecast leaders', text: 'Find products with the highest forecast.', prompt: 'Which products have the highest forecast?' }, { title: 'Forecast anomalies', text: 'Investigate unusual demand signals.', prompt: 'Show forecast anomalies' }, { title: 'Data readiness', text: 'Check whether sales history is ready.', prompt: 'Is sales history ready?' }]
+                  ).map((task, index) => <button type="button" key={task.title} disabled={loading} onClick={() => { setQuestion(task.prompt); document.getElementById('message-input')?.focus(); }}><span className="task-number">0{index + 1}</span><strong>{task.title}</strong><span>{task.text}</span><span className="task-action">Use this question <ArrowUpRight size={14} /></span></button>)}
+                </div>
+                <div className="empty-evidence-note"><Database size={15} /><span>Results and supporting evidence appear here after analysis.</span></div>
               </div>
             )}
           </section>
@@ -1124,7 +1139,7 @@ export default function App() {
                 {message.role === 'assistant' && message.insights && message.insights.length > 0 && <span className="message-evidence"><Database size={12} /> Evidence attached</span>}
               </article>
             ))}
-            {loading && <div className="thinking"><span /><span /><span /> Analyzing planning data</div>}
+            {loading && <div className="thinking" role="status"><span /><span /><span /> Agent is processing your request</div>}
           </div>
           {error && <div className="request-error" role="alert">{error}</div>}
           <div className="composer-area">
