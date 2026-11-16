@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { VoiceInput, SpeakResponse } from './VoiceControls';
 import remarkGfm from 'remark-gfm';
 import yashLogo from './assets/Yash logo.jpg';
 import jouleLogo from './assets/sap-joule-logo.svg';
@@ -1075,6 +1076,7 @@ export default function App() {
                   ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                   : <p>{message.content}</p>}
                 {message.role === 'assistant' && message.insights && message.insights.length > 0 && <span className="message-evidence"><Database size={12} /> Evidence attached</span>}
+                {message.role === 'assistant' && <SpeakResponse text={message.content} />}
               </article>
             ))}
             {loading && <div className="thinking" role="status"><span /><span /><span /> Agent is processing your request</div>}
@@ -1092,7 +1094,7 @@ export default function App() {
                 aria-label={`Message ${chatAgentName}`}
                 disabled={loading}
               />
-              <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
+              <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><VoiceInput value={question} onChange={setQuestion} disabled={loading} /><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
             </form></div>
             <p className="privacy-note">{agentMode === 'maintenance' ? 'Read-only S/4 maintenance schedule data.' : agentMode === 's4' ? 'Read-only S/4 capacity data.' : 'Analysis is based on available planning data.'}</p>
           </div>

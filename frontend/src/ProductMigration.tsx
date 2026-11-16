@@ -4,6 +4,7 @@ import './product-migration.css';
 import oracleLogo from './assets/oracle-logo.svg';
 import sapLogo from './assets/sap-logo.svg';
 import GenieMascot from './GenieMascot';
+import { VoiceInput, SpeakResponse } from './VoiceControls';
 
 interface Summary {
   records: number;
@@ -338,6 +339,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                     <div key={message.id} className={`pm-chat-message ${message.role}`}>
                       <span>{message.role === 'user' ? 'You' : 'Agent'}</span>
                       <p>{message.text}</p>
+                      {message.role === 'assistant' && <SpeakResponse text={message.text} />}
                     </div>
                   ))}
                 </div>
@@ -348,6 +350,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                     placeholder="Example: set BESKZ to E or set DISMM to PD"
                     rows={3}
                   />
+                  <VoiceInput value={correction} onChange={setCorrection} disabled={loading} />
                   <button type="button" className="pm-run" onClick={() => void applyCorrection()} disabled={loading || !correction.trim()}>
                     <Send size={15} /> Apply
                   </button>

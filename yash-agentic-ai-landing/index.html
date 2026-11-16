@@ -19,7 +19,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Urbanist:wght@500;600;700;800&display=swap">
 <link rel="preload" as="image" href="assets/hero-poster.jpg">
-<link rel="stylesheet" href="css/styles.css">
+<link rel="stylesheet" href="css/styles.css?v=2">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -27,8 +27,7 @@
 <header class="nav" id="top-nav">
   <div class="nav-inner">
     <a class="brand" href="#top" aria-label="YASH Agentic AI home">
-      <svg viewBox="0 0 48 52" aria-hidden="true"><g fill="none" stroke="#edbd56" stroke-width="3" stroke-linejoin="round"><path d="M24 2 43 12 24 22 5 12 24 2ZM5 18v20l15 9V27L5 18Zm38 0v20l-15 9V27l15-9Z"/></g></svg>
-      <span><span class="brand-name">YASH</span><span class="brand-sub">AGENTIC AI</span></span>
+      <img class="brand-logo" src="assets/yash-logo.png" width="142" height="56" alt="YASH Technologies">
     </a>
     <nav class="nav-links" aria-label="Primary">
       <a href="#agents">Agents</a><a href="#how">How It Works</a><a href="#why">Why YASH</a><a href="#cases">Case Studies</a>
@@ -63,6 +62,7 @@
       <div class="actions reveal-hero" style="--d:.42s">
         <button class="button" data-destination="dashboard"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 19a9 9 0 1 1 16 0M12 4v3M5 8l2 2M3 14h3M19 8l-2 2M18 14h3M12 14l4-5"/><circle cx="12" cy="15" r="2"/></svg>Enter Dashboard</button>
         <button class="button secondary" data-destination="caseStudies">View Case Studies <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 12h17m-6-6 6 6-6 6"/></svg></button>
+        <a class="button secondary" href="https://factory-studio-temp.cfapps.eu10-004.hana.ondemand.com/">IoT Lab</a>
       </div>
     </div>
     <div class="visual">
@@ -86,31 +86,31 @@
     </div>
     <div class="cards">
       <article class="card agent reveal">
-        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20h18M5 20V10h4v10M10 20V4h4v16M15 20v-7h4v7"/></svg></div>
+        <div class="icon agent-icon" aria-hidden="true"><img src="assets/genie-cutout-DuPGnqnr.webp" alt=""></div>
         <h3>Capacity Bottleneck Resolver</h3>
         <p>Identifies production bottlenecks by plant/date, suggests alternate work centers, shifts orders with approval and forward-schedules planned orders when capacity is full.</p>
         <div class="pills"><span class="pill dev">In Development</span><span class="pill ready">Demo Ready</span></div>
       </article>
       <article class="card agent reveal">
-        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3 1 0 2-.1 2.9-.2"/><path d="m16 18 2 2 4-4"/></svg></div>
+        <div class="icon agent-icon" aria-hidden="true"><img src="assets/genie-cutout-DuPGnqnr.webp" alt=""></div>
         <h3>Master Data Check-in Agent (MDU)</h3>
         <p>Validates master data completeness and accuracy before downstream processes; Oracle to SAP S/4HANA product master conversion workbench.</p>
         <div class="pills"><span class="pill dev">In Development</span><span class="pill ready">Demo Ready</span></div>
       </article>
       <article class="card agent reveal">
-        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9l9-5 9 5v11H3z"/><path d="M7 20v-6h10v6M7 17h10"/></svg></div>
+        <div class="icon agent-icon" aria-hidden="true"><img src="assets/genie-cutout-DuPGnqnr.webp" alt=""></div>
         <h3>EWM Queue Monitoring Agent</h3>
         <p>Handles SAP EWM stuck queues and suggests corrective actions.</p>
         <div class="pills"><span class="pill dev">In Development</span><span class="pill ready">Demo Ready</span></div>
       </article>
       <article class="card agent reveal">
-        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"/></svg></div>
+        <div class="icon agent-icon" aria-hidden="true"><img src="assets/genie-cutout-DuPGnqnr.webp" alt=""></div>
         <h3>Plant Maintenance Agent</h3>
         <p>Predicts future maintenance from history and measuring inputs (temperature, pressure, vibration, load), with tracking and actions for maintenance.</p>
         <div class="pills"><span class="pill dev">In Development</span></div>
       </article>
       <article class="card agent reveal">
-        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8M8 10.5h5M10.5 8v5"/></svg></div>
+        <div class="icon agent-icon" aria-hidden="true"><img src="assets/genie-cutout-DuPGnqnr.webp" alt=""></div>
         <h3>Root Cause Analysis for IBP</h3>
         <p>Identifies root causes why SAP IBP did not create a plan as expected, comparing the IBP plan with Excel.</p>
         <div class="pills"><span class="pill dev">In Development</span></div>
@@ -205,8 +205,7 @@
 <footer class="footer">
   <div class="shell footer-inner">
     <div class="brand">
-      <svg viewBox="0 0 48 52" aria-hidden="true"><g fill="none" stroke="#edbd56" stroke-width="3" stroke-linejoin="round"><path d="M24 2 43 12 24 22 5 12 24 2ZM5 18v20l15 9V27L5 18Zm38 0v20l-15 9V27l15-9Z"/></g></svg>
-      <span><span class="brand-name">YASH</span><span class="brand-sub">AGENTIC AI</span></span>
+      <img class="brand-logo" src="assets/yash-logo.png" width="142" height="56" alt="YASH Technologies">
     </div>
     <nav class="footer-links" aria-label="Footer"><a href="#agents">Agents</a><a href="#how">How It Works</a><a href="#why">Why YASH</a><a href="#cases">Case Studies</a></nav>
     <p class="contact">Contact: [team email]</p>

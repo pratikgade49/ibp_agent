@@ -6,6 +6,7 @@ import type { ChatMessage } from './types';
 import ScenarioForecastPreview from './ScenarioForecastPreview';
 import './scenario-test-agent.css';
 import GenieMascot from './GenieMascot';
+import { VoiceInput, SpeakResponse } from './VoiceControls';
 
 interface ScenarioTestAgentProps {
   messages: ChatMessage[];
@@ -86,6 +87,7 @@ export default function ScenarioTestAgent({
                 {message.role === 'assistant'
                   ? <div className="scenario-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                   : <p>{message.content}</p>}
+                {message.role === 'assistant' && <SpeakResponse text={message.content} />}
               </article>
             ))}
             {loading && <div className="scenario-thinking"><i /><i /><i /> Checking scenario inputs</div>}
@@ -102,6 +104,7 @@ export default function ScenarioTestAgent({
             />
             <div className="scenario-composer-footer">
               <span>Version and scenario IDs are used for read and write</span>
+              <VoiceInput value={draft} onChange={setDraft} disabled={loading} />
               <button type="submit" aria-label="Send request" disabled={!draft.trim() || loading}><Send size={16} /></button>
             </div>
           </form></div>

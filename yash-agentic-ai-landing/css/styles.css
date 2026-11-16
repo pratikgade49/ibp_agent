@@ -237,3 +237,9 @@ dialog button{padding:11px 22px;font:700 15px var(--body);border:0;border-radius
   .scroll-cue{display:none}
   .eyebrow{font-size:11.5px}
 }
+
+/* Brand and agent artwork */
+.brand-logo{width:142px;height:56px;object-fit:contain}
+.agent-icon{overflow:hidden}
+.agent-icon img{width:100%;height:100%;object-fit:contain;object-position:center top;transform:scale(1.2)}
+a.button{text-decoration:none}

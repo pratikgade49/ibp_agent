@@ -241,3 +241,9 @@ dialog button{padding:11px 22px;font:700 15px var(--body);border:0;border-radius
 .agent-link{color:var(--gold-2);font-weight:700;text-decoration:none;display:inline-flex;gap:8px;align-items:center}.agent-link::after{content:"";position:absolute;inset:0;border-radius:inherit}.agent-link:focus-visible{outline:2px solid var(--gold-2);outline-offset:5px}.card.agent:focus-within{box-shadow:0 0 0 2px var(--gold-2),0 26px 70px rgba(0,0,0,.45)}
 
 .case-video-button{margin-top:auto;align-self:flex-start;background:transparent;color:var(--gold-2);border:1px solid rgba(240,192,91,.65);border-radius:8px;padding:12px 16px;font:600 15px var(--body);cursor:pointer}.case{display:flex;flex-direction:column}.case-video-button:hover{background:rgba(240,192,91,.1)}.case-video-button:focus-visible,.video-close:focus-visible{outline:2px solid #fff;outline-offset:4px}.video-dialog{width:min(94vw,1050px);max-width:none;max-height:92dvh;padding:clamp(16px,3vw,28px)}.video-dialog-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.video-dialog-header h2{margin:0}.video-dialog video{display:block;width:100%;max-height:calc(92dvh - 120px);aspect-ratio:16/9;background:#000;border-radius:8px}.video-dialog .video-close{flex:none}
+
+/* Brand and agent artwork */
+.brand-logo{width:142px;height:56px;object-fit:contain}
+.agent-icon{overflow:hidden}
+.agent-icon img{width:100%;height:100%;object-fit:contain;object-position:center top;transform:scale(1.2)}
+a.button{text-decoration:none}
