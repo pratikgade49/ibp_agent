@@ -150,6 +150,29 @@ class S4ProductTests(unittest.TestCase):
         self.addCleanup(llm_patch.stop)
 
     @patch("product_migration_agent.s4_product._s4_request_config", return_value=("https://s4.example", {"timeout": 2}))
+    def test_lead_times_sent_to_plant_supply_planning(self, _request_config):
+        metadata = METADATA.replace(
+            b'<Property Name="ProcurementType" Type="Edm.String"/>',
+            b'<Property Name="ProcurementType" Type="Edm.String"/><NavigationProperty Name="to_ProductSupplyPlanning" Relationship="API_PRODUCT_SRV.SupplyAssoc" ToRole="Supply"/>',
+        ).replace(
+            b'<Association Name="DescriptionAssoc">',
+            b'<EntityType Name="A_ProductSupplyPlanningType"><Key><PropertyRef Name="Product"/><PropertyRef Name="Plant"/></Key><Property Name="Product" Type="Edm.String"/><Property Name="Plant" Type="Edm.String"/><Property Name="PlannedDeliveryDurationInDays" Type="Edm.Decimal"/><Property Name="InHouseProductionTime" Type="Edm.Decimal"/></EntityType><Association Name="SupplyAssoc"><End Role="Plant" Type="API_PRODUCT_SRV.A_ProductPlantType"/><End Role="Supply" Type="API_PRODUCT_SRV.A_ProductSupplyPlanningType"/></Association><Association Name="DescriptionAssoc">',
+        ).replace(
+            b'<EntitySet Name="A_ProductPlant" EntityType="API_PRODUCT_SRV.A_ProductPlantType"/>',
+            b'<EntitySet Name="A_ProductPlant" EntityType="API_PRODUCT_SRV.A_ProductPlantType"/><EntitySet Name="A_ProductSupplyPlanning" EntityType="API_PRODUCT_SRV.A_ProductSupplyPlanningType"/>',
+        )
+        session = FakeSession()
+        row = {"MATNR": "P-1", "MAKTX": "Pump", "WERKS": "PL01", "PLIFZ": "36", "DZEIT": "13"}
+        mappings = field_map_for(row) + [{"field": "PLIFZ", "oracle_field": "Planned Delivery Time"}, {"field": "DZEIT", "oracle_field": "In-House Production Time"}]
+        llm = FakeMetadataLLM(skipped_fields={"PLIFZ", "DZEIT"})
+        with patch.object(session, "get", side_effect=lambda url, **kw: FakeResponse(200, headers={"x-csrf-token": "csrf-test"}, content=metadata) if url.endswith("/$metadata") else FakeResponse(200)):
+            with patch("product_migration_agent.s4_product.requests.Session", return_value=session):
+                result = s4_product.push_products([row], field_map=mappings, llm=llm)
+        self.assertEqual(result["created"], 1)
+        supply = session.post_calls[1][1]["json"]["to_ProductSupplyPlanning"]
+        self.assertEqual(supply, {"Product": "900001", "Plant": "PL01", "PlannedDeliveryDurationInDays": "36", "InHouseProductionTime": "13"})
+
+    @patch("product_migration_agent.s4_product._s4_request_config", return_value=("https://s4.example", {"timeout": 2}))
     def test_plant_lot_size_is_sent_in_nested_supply_planning(self, _request_config):
         session = FakeSession()
         metadata = METADATA.replace(

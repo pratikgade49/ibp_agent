@@ -154,6 +154,9 @@ def convert_files(data: bytes, mapping: bytes, rules: bytes, min_conf: float | N
     entries, stats, warns = compile_rules(rs, mp, llm, cache["rules"], min_conf)
     if missing_source_fields:
         warns.append("Skipped mappings with Oracle columns absent from the data: " + ", ".join(missing_source_fields))
+    unmapped_sources = [col for col in src.columns if col not in set(mp["Oracle Field"]) and src[col].ne("").any()]
+    if unmapped_sources:
+        warns.append("Populated Oracle columns omitted because they have no mapping: " + ", ".join(unmapped_sources))
     sap_df = to_sap_frame(src, mp)
     maps, map_dec = decide_value_maps(sap_df, mp, entries, min_conf, llm, cache["maps"], manual_maps)
     with _cache_lock:
@@ -224,6 +227,8 @@ def convert_files(data: bytes, mapping: bytes, rules: bytes, min_conf: float | N
                 "oracle_field": str(row["Oracle Field"]).strip(),
                 "field": str(row["SAP Field"]),
                 "sap_description": str(row["SAP Description"]).strip(),
+                "api_attribute": str(row.get("API Attribute Name", "")).strip(),
+                "level": str(row.get("Level", "")).strip(),
             }
             for _, row in mp.iterrows()
         ],

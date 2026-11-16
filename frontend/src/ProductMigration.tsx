@@ -56,8 +56,9 @@ interface PushItem {
   endpoint?: string;
   fields?: string[];
   root_http_status?: number;
+  ignored_fields?: string[];
   root_included_deep_entities?: string[];
-  related_results?: { entity: string; status: string; error?: string; http_status?: number; method?: string; endpoint?: string; included_deep_entities?: string[] }[];
+  related_results?: { entity: string; status: string; error?: string; http_status?: number; method?: string; endpoint?: string; included_deep_entities?: string[]; request_fields?: string[]; nested_request_fields?: Record<string, string[]> }[];
 }
 
 interface PushResponse {
@@ -260,17 +261,24 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                             {item.error ? `: ${item.error}` : ''}
                             {item.root_included_deep_entities?.length ? `; included in root request: ${item.root_included_deep_entities.join(', ')}` : ''}
                           </li>
+                          {item.ignored_fields && item.ignored_fields.length > 0 && (
+                            <li>Populated fields omitted because no SAP API mapping was found: {item.ignored_fields.join(', ')}</li>
+                          )}
                           {item.related_results?.map((related, childIndex) => (
                             <li key={`${related.entity}-${childIndex}`}>
                               {related.entity}: {related.status}{related.http_status ? ` (HTTP ${related.http_status})` : ''}
                               {related.error ? `: ${related.error}` : ''}
                               {related.included_deep_entities?.length ? `; included in this request: ${related.included_deep_entities.join(', ')}` : ''}
+                              {related.request_fields?.length ? `; request fields: ${related.request_fields.join(', ')}` : ''}
+                              {related.nested_request_fields && Object.entries(related.nested_request_fields).map(([entity, fields]) => (
+                                <span key={entity}>{`; ${entity} request fields: ${fields.join(', ')}`}</span>
+                              ))}
                             </li>
                           ))}
                         </ul>
                       </li>
                     ))}</ul>
-                    <p>Included nested entities share the parent request result; their individual status is not separately confirmed.</p>
+                    <p>The description is included with the main product. Nested entities share the parent request result. Request fields show what was sent; confirm saved values in SAP.</p>
                   </div>
                 )}
 

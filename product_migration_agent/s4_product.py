@@ -190,20 +190,26 @@ def _metadata_model(xml_content: bytes) -> dict:
         ends = associations.get(details["relationship"], {})
         target_type = ends.get(details["to_role"], "")
         nav_targets[navigation] = entity_set_by_type.get(target_type, "")
+    # Traverse the service graph without revisiting a type in the same path.
     target_options = []
-    for prop in root_type["properties"]:
-        if prop == ROOT_KEY_PROPERTY:
-            continue
-        target_options.append({"entity": ROOT_ENTITY_SET, "property": prop, "navigation": ""})
-    for navigation, entity_set in nav_targets.items():
-        child_type_name = entity_sets.get(entity_set)
-        child_type = entity_types.get(child_type_name)
-        if not child_type:
-            continue
-        for prop in child_type["properties"]:
-            if prop == ROOT_KEY_PROPERTY:
+    navigation_entities = {"": ROOT_ENTITY_SET}
+    def visit(entity, path, ancestors):
+        entity_type_name = entity_sets.get(entity)
+        entity_type = entity_types.get(entity_type_name, {})
+        for prop in entity_type.get("properties", {}):
+            if prop != ROOT_KEY_PROPERTY:
+                target_options.append({"entity": entity, "property": prop, "navigation": path})
+        if entity_type_name in ancestors:
+            return
+        for nav, details in entity_type.get("navigations", {}).items():
+            target_type = associations.get(details["relationship"], {}).get(details["to_role"], "")
+            target_set = entity_set_by_type.get(target_type)
+            if not target_set or target_type in ancestors or target_type == entity_type_name:
                 continue
-            target_options.append({"entity": entity_set, "property": prop, "navigation": navigation})
+            child_path = f"{path}/{nav}" if path else nav
+            navigation_entities[child_path] = target_set
+            visit(target_set, child_path, ancestors | {entity_type_name})
+    visit(ROOT_ENTITY_SET, "", set())
     return {
         "entity_types": entity_types,
         "entity_sets": entity_sets,
@@ -211,6 +217,7 @@ def _metadata_model(xml_content: bytes) -> dict:
         "root_creatable": entity_set_creatable.get(ROOT_ENTITY_SET),
         "root_type": root_type_name,
         "root_navigations": nav_targets,
+        "navigation_entities": navigation_entities,
         "target_options": target_options,
     }
 
@@ -249,30 +256,105 @@ def _tentative_target(target: dict, options: list[dict]) -> dict | None:
 def _map_source_fields(field_map: list[dict], records: list[dict], metadata: dict, llm) -> list[dict]:
     populated = {
         field for row in records for field, value in row.items()
-        if field != KEY_FIELD and value not in (None, "")
+        if value not in (None, "")
     }
     sources = {}
     for item in field_map:
         field = str(item.get("field", "")).strip()
         oracle_field = str(item.get("oracle_field", "")).strip()
+        if field == KEY_FIELD and re.sub(r"[^a-z0-9]", "", str(item.get("api_attribute", "")).casefold()) != "productoldid":
+            continue
         if field in populated and oracle_field:
             sources[field] = {
                 "field": field,
                 "oracle_field": oracle_field,
                 "sap_description": str(item.get("sap_description", "")).strip(),
+                "api_attribute": str(item.get("api_attribute", "")).strip(),
+                "level": str(item.get("level", "")).strip(),
+                "sample_values": list(dict.fromkeys(str(row[field]) for row in records
+                                      if row.get(field) not in (None, "")))[:3],
             }
     if not sources:
         return []
 
+    # Match the workbook's SAP Description, not the technical SAP field.
+    known = {
+        "material description": ("to_Description", "ProductDescription"),
+        "material type": ("", "ProductType"),
+        "industry sector": ("", "IndustrySector"),
+        "base unit of measure": ("", "BaseUnit"),
+        "material group": ("", "ProductGroup"),
+        "division": ("", "Division"),
+        "gross weight": ("", "GrossWeight"),
+        "net weight": ("", "NetWeight"),
+        "weight unit": ("", "WeightUnit"),
+        "volume": ("", "MaterialVolume"),
+        "volume unit": ("", "VolumeUnit"),
+        "plant": ("to_Plant", "Plant"),
+        "mrp type": ("to_Plant", "MRPType"),
+        "mrp controller": ("to_Plant", "MRPResponsible"),
+        "procurement type": ("to_Plant", "ProcurementType"),
+        "purchasing group": ("to_Plant", "PurchasingGroup"),
+        "availability check": ("to_Plant", "AvailabilityCheckType"),
+        "lot size key": ("to_Plant/to_ProductSupplyPlanning", "LotSizingProcedure"),
+        "planned delivery time": ("to_Plant/to_ProductSupplyPlanning", "PlannedDeliveryDurationInDays"),
+        "in-house production time": ("to_Plant/to_ProductSupplyPlanning", "InHouseProductionTime"),
+        "loading group": ("to_Plant/to_PlantSales", "LoadingGroup"),
+        "valuation class": ("to_Valuation", "ValuationClass"),
+        "price control": ("to_Valuation", "InventoryValuationProcedure"),
+        "standard price": ("to_Valuation", "StandardPrice"),
+    }
+    normalize = lambda value: re.sub(r"[^a-z0-9]", "", str(value).casefold())
+    deterministic = {}
+    for field, source in sources.items():
+        option = None
+        if source["api_attribute"]:
+            attribute = normalize(source["api_attribute"])
+            candidates = [o for o in metadata["target_options"] if normalize(o["property"]) == attribute]
+            level = source["level"].casefold()
+            candidates = [o for o in candidates if not level or
+                          (level == "base" and o["navigation"] == "") or
+                          (level == "plant" and (o["navigation"] == "to_Plant" or o["navigation"].startswith("to_Plant/"))) or
+                          (level == "valuation" and o["navigation"] == "to_Valuation")]
+            if len(candidates) == 1:
+                option = candidates[0]
+            elif len(candidates) > 1:
+                description = re.sub(r"\s+", " ", source["sap_description"].strip().casefold())
+                preferred = known.get(description)
+                option = next((o for o in candidates if preferred and
+                               (o["navigation"], o["property"]) == preferred), None)
+        if not option:
+            description = re.sub(r"\s+", " ", source["sap_description"].strip().casefold())
+            chosen = known.get(description)
+            # Descriptive compound entries need interpretation; a simple explicit
+            # attribute must never be silently replaced by a different property.
+            if source["api_attribute"] and normalize(source["api_attribute"]) not in {
+                "languagelongtext", "valuationclassalongwithvaluationareaandvaluationtype"
+            }:
+                chosen = None
+            option = next((o for o in metadata["target_options"]
+                           if chosen and (o["navigation"], o["property"]) == chosen), None)
+        if option:
+            deterministic[field] = {**source, **option}
+    unresolved = {field: source for field, source in sources.items() if field not in deterministic}
+    if not unresolved:
+        return list(deterministic.values())
+    used_targets = {(item["entity"], item["property"], item["navigation"])
+                    for item in deterministic.values()}
+    available_options = [option for option in metadata["target_options"]
+                         if (option["entity"], option["property"], option["navigation"]) not in used_targets]
+
     user = (
-        "Map each source to exactly one matching S/4 target using the Oracle field name as the primary clue. "
-        "The SAP technical field and description are supporting context. Use only exact entity, property, "
-        "and navigation values from the metadata options. Do not map the source material key. Do not guess; "
+        "Map each source to exactly one matching S/4 target using SAP Description and API Attribute Name. "
+        "The SAP field and Oracle field are identifiers only, not clues to select a target. "
+        "Sample values are converted values for context; do not change or infer their meaning without evidence. "
+        "Use only exact entity, property, and navigation values from the metadata options. "
+        "Never map a source to the generated Product key. Do not guess; "
         "if a source cannot be mapped confidently, omit it. Return JSON only in this shape: "
         '{"mappings":[{"field":"SAP technical field","oracle_field":"Oracle source field",'
         '"entity":"metadata entity set","property":"metadata property","navigation":"metadata navigation or empty"}]}\n'
-        f"Source fields: {json.dumps(list(sources.values()))}\n"
-        f"S/4 metadata options: {json.dumps(metadata['target_options'])}"
+        f"Source fields: {json.dumps(list(unresolved.values()))}\n"
+        f"S/4 metadata options: {json.dumps(available_options)}"
     )
     try:
         from agent.llm import get_llm_client
@@ -287,9 +369,9 @@ def _map_source_fields(field_map: list[dict], records: list[dict], metadata: dic
 
     options = {
         (option["entity"], option["property"], option["navigation"])
-        for option in metadata["target_options"]
+        for option in available_options
     }
-    mapped = {}
+    mapped = dict(deterministic)
     rejected = set()
     for item in response.get("mappings", []):
         if not isinstance(item, dict):
@@ -304,7 +386,7 @@ def _map_source_fields(field_map: list[dict], records: list[dict], metadata: dic
             "property": str(item.get("property", "")).strip(),
             "navigation": str(item.get("navigation", "")).strip(),
         }
-        if field not in sources or oracle_field != sources[field]["oracle_field"]:
+        if field not in unresolved or oracle_field != sources[field]["oracle_field"]:
             continue
         if field in mapped or field in rejected:
             mapped.pop(field, None)
@@ -327,16 +409,13 @@ def _map_source_fields(field_map: list[dict], records: list[dict], metadata: dic
         for field, source in sources.items():
             if field in mapped:
                 continue
-            descriptors = (
-                field, source["oracle_field"], source["sap_description"],
-            )
+            descriptors = (source["sap_description"], source["api_attribute"])
             normalized = [
                 re.sub(r"[^a-z0-9]", "", value.casefold())
                 for value in descriptors if value
             ]
             if any(
-                value == "maktx"
-                or "description" in value
+                "description" in value
                 or "productname" in value
                 or "materialtext" in value
                 or "shorttext" in value
@@ -367,7 +446,7 @@ def _field_map_report(field_map: list[dict], records: list[dict], metadata: dict
         navigation = str(target.get("navigation", "")).strip()
         message = ""
         mapping_status = "matched"
-        if sap_field == KEY_FIELD:
+        if sap_field == KEY_FIELD and prop == ROOT_KEY_PROPERTY:
             mapping_status = "optional_unmapped"
             message = f"Source {KEY_FIELD} identifies this input row; S/4 {ROOT_KEY_PROPERTY} is generated by SAP and must not be mapped"
         elif sap_field and sap_field not in populated_fields and not entity and not prop:
@@ -391,7 +470,7 @@ def _field_map_report(field_map: list[dict], records: list[dict], metadata: dict
                 message = f"{ROOT_KEY_PROPERTY} is generated by SAP and must not be mapped"
             elif entity == ROOT_ENTITY_SET and navigation:
                 message = "Root entity fields must not specify a navigation property"
-            elif entity != ROOT_ENTITY_SET and metadata["root_navigations"].get(navigation) != entity:
+            elif entity != ROOT_ENTITY_SET and not any(o["entity"] == entity and o["property"] == prop and o["navigation"] == navigation for o in metadata["target_options"]):
                 message = f"Entity set {entity!r} is not the target of A_Product navigation {navigation!r}"
 
         if message and mapping_status != "not_populated":
@@ -619,17 +698,8 @@ def push_products(records: list[dict], error_materials: set[str] | None = None,
     if metadata.get("root_creatable") is False:
         raise ValueError(f"S/4 metadata marks {ROOT_ENTITY_SET} as non-creatable")
     field_map = _map_source_fields(field_map or [], records, metadata, llm)
-    # WERKS identifies the plant; do not depend on a model guessing this key.
-    if any(row.get("DISLS") not in (None, "") for row in records):
-        plant_target = next((option for option in metadata["target_options"] if option["navigation"] == "to_Plant" and option["property"] == "Plant"), None)
-        plant_source = next((item for item in (field_map or []) if item.get("field") == "WERKS"), None)
-        if plant_target and any(row.get("WERKS") not in (None, "") for row in records):
-            field_map = [item for item in field_map if item.get("field") != "WERKS"]
-            field_map.append({"field": "WERKS", "oracle_field": (plant_source or {}).get("oracle_field", ""), **plant_target})
-    # DISLS is sent to the nested supply-planning entity below, not a guessed direct target.
-    field_map = [item for item in field_map if item.get("field") != "DISLS"]
     validated_map = _validate_field_map(field_map, records, metadata)
-
+    ignored_fields = sorted(populated - set(validated_map))
     entity_response = session.get(
         f"{root_url}/{ROOT_ENTITY_SET}",
         params={"$top": 0, "$format": "json"},
@@ -652,120 +722,161 @@ def push_products(records: list[dict], error_materials: set[str] | None = None,
     write_options["cookies"] = token_response.cookies
 
     results = []
+    mapped_paths = {target["navigation"] for targets in validated_map.values() for target in targets
+                    if target["navigation"]}
+    # Create parents first, including parents needed only as keys for descendants.
+    paths = set(mapped_paths)
+    paths.discard("to_Description")
+    # SAP requires lot sizing during plant creation in this service. Supply
+    # planning is therefore deep-inserted in the plant request.
+    supply_path = "to_Plant/to_ProductSupplyPlanning"
+    paths.discard(supply_path)
+    for path in list(paths):
+        while "/" in path:
+            path = path.rsplit("/", 1)[0]
+            paths.add(path)
+    paths = sorted(paths, key=lambda path: (path.count("/"), path))
     for material, material_rows in grouped.items():
         if material in error_materials:
-            results.append({"material": material, "status": "skipped_conversion_errors"})
+            results.append({"material": material, "status": "skipped_conversion_errors",
+                            "error": "Conversion errors prevent this product from being uploaded."})
             continue
         try:
             root_payload = _row_payload(material_rows[0], ROOT_ENTITY_SET, "", validated_map)
+            description_entity = metadata["root_navigations"].get("to_Description")
+            description = _row_payload(material_rows[0], description_entity, "to_Description", validated_map)
+            if not description.get("ProductDescription"):
+                raise ValueError("Missing product description: map a populated source field to ProductDescription")
+            description.setdefault("Language", DEFAULT_PRODUCT_DESCRIPTION_LANGUAGE)
+            description["Product"] = ""
+            root_payload["to_Description"] = {"results": [description]}
             for prop, default_value in DEFAULT_PRODUCT_CREATE_FIELDS.items():
                 root_payload.setdefault(prop, default_value)
             root_payload[ROOT_KEY_PROPERTY] = ""
-            child_payloads = []
-            for navigation, entity in metadata["root_navigations"].items():
-                child_payload = _row_payload(material_rows[0], entity, navigation, validated_map)
-                if child_payload:
-                    if navigation == "to_Description":
-                        child_payload.setdefault(
-                            "Language", DEFAULT_PRODUCT_DESCRIPTION_LANGUAGE
-                        )
-                        child_payload[ROOT_KEY_PROPERTY] = ""
-                        root_payload[navigation] = {"results": [child_payload]}
-                    else:
-                        child_payloads.append((navigation, child_payload))
-            # Supply-planning data must accompany the plant create request.
-            lot_size = material_rows[0].get("DISLS")
-            if lot_size not in (None, ""):
-                plant = next((payload for nav, payload in child_payloads if nav == "to_Plant"), None)
-                if plant is None or not plant.get("Plant"):
-                    raise ValueError("Lot sizing requires a mapped Plant for supply planning")
-                plant_entity = metadata["root_navigations"].get("to_Plant")
-                plant_type = metadata["entity_types"].get(metadata["entity_sets"].get(plant_entity), {})
-                if "to_ProductSupplyPlanning" not in plant_type.get("navigations", {}):
-                    raise ValueError("Plant supply-planning navigation is absent from S/4 metadata")
-                plant["to_ProductSupplyPlanning"] = {
-                    "Plant": plant["Plant"], "LotSizingProcedure": str(lot_size).strip(),
-                    **{key: plant[key] for key in ("MRPType", "MRPResponsible", "ProcurementType") if key in plant},
-                }
-            if "to_Description" not in root_payload:
-                raise ValueError(
-                    "S/4 requires a product description during product creation; map a populated source field to ProductDescription"
-                )
+            if not root_payload.get("ProductType"):
+                raise ValueError("Missing required ProductType: map and populate the Oracle Product Type field")
             root_type = metadata["entity_types"][metadata["root_type"]]
-            missing_required = [
-                prop for prop in root_type["required_properties"]
-                if root_payload.get(prop) in (None, "")
-            ]
-            if missing_required:
-                raise ValueError(
-                    "A_Product payload is missing metadata-required property/properties: "
-                    + ", ".join(sorted(missing_required))
-                )
+            missing = sorted(prop for prop in root_type["required_properties"]
+                             if root_payload.get(prop) in (None, ""))
+            if missing:
+                raise ValueError("A_Product missing required properties: " + ", ".join(missing))
+            for other_row in material_rows[1:]:
+                if _row_payload(other_row, ROOT_ENTITY_SET, "", validated_map) != _row_payload(material_rows[0], ROOT_ENTITY_SET, "", validated_map):
+                    raise ValueError("Rows for this product contain conflicting root product values")
         except ValueError as exc:
-            results.append({"material": material, "status": "invalid_mapping_or_values", "error": str(exc)})
+            results.append({"material": material, "status": "invalid_mapping_or_values", "error": str(exc),
+                            "ignored_fields": sorted(field for field in ignored_fields if any(row.get(field) not in (None, "") for row in material_rows))})
             continue
 
         collection_url = f"{root_url}/{ROOT_ENTITY_SET}"
         create_response = session.post(collection_url, json=root_payload, **write_options)
         if not create_response.ok:
-            sap_error = _response_error(create_response)
-            create_not_allowed = "create operation not allowed" in sap_error.casefold()
-            results.append({
-                "material": material,
-                "status": "create_not_allowed" if create_not_allowed else "product_create_failed",
-                "http_status": create_response.status_code,
-                "method": "POST",
-                "endpoint": f"{PRODUCT_SERVICE_ROOT}/{ROOT_ENTITY_SET}",
-                "sap_request_id": create_response.headers.get("x-vcap-request-id"),
-                "request_fields": sorted(
-                    field for field in root_payload if field not in metadata["root_navigations"]
-                ),
-                "error": (
-                    "S/4 Gateway rejected POST create on A_Product with HTTP "
-                    f"{create_response.status_code}. SAP returned this create-operation error; "
-                    "the message alone does not distinguish an entity capability, request-shape, "
-                    "or backend implementation issue. "
-                    f"SAP response: {sap_error}"
-                    if create_not_allowed else sap_error
-                ),
-            })
+            results.append({"material": material, "status": "product_create_failed",
+                            "http_status": create_response.status_code, "method": "POST",
+                            "endpoint": f"{PRODUCT_SERVICE_ROOT}/{ROOT_ENTITY_SET}",
+                            "error": _response_error(create_response),
+                            "ignored_fields": sorted(field for field in ignored_fields if any(row.get(field) not in (None, "") for row in material_rows))})
             continue
-
         generated_id = _generated_product_id(create_response)
         related_results = []
-        if child_payloads and generated_id:
-            escaped_id = quote(generated_id.replace("'", "''"), safe="")
-            for navigation, child_payload in child_payloads:
-                child_payload[ROOT_KEY_PROPERTY] = generated_id
-                if navigation == "to_Plant" and "to_ProductSupplyPlanning" in child_payload:
-                    child_payload["to_ProductSupplyPlanning"][ROOT_KEY_PROPERTY] = generated_id
-                child_url = f"{root_url}/{ROOT_ENTITY_SET}('{escaped_id}')/{navigation}"
-                child_response = session.post(child_url, json=child_payload, **write_options)
-                related_results.append({
-                    "entity": navigation,
-                    "status": "created" if child_response.ok else "failed",
-                    "http_status": child_response.status_code,
-                    "method": "POST",
-                    "endpoint": f"{PRODUCT_SERVICE_ROOT}/{ROOT_ENTITY_SET}('{escaped_id}')/{navigation}",
-                    "included_deep_entities": ["to_ProductSupplyPlanning"] if "to_ProductSupplyPlanning" in child_payload else [],
-                    **({} if child_response.ok else {"error": _response_error(child_response)}),
-                })
-        elif child_payloads:
-            related_results.extend({
-                "entity": navigation,
-                "status": "failed",
-                "error": "SAP created the product but did not return its generated Product key; related data was not sent",
-            } for navigation, _ in child_payloads)
+        seen = {}
+        for row_index, row in enumerate(material_rows):
+            parents = {"": {"Product": generated_id}}
+            for path in paths:
+                entity = metadata["navigation_entities"].get(path)
+                parent_path = path.rsplit("/", 1)[0] if "/" in path else ""
+                parent = parents.get(parent_path)
+                if not generated_id:
+                    related_results.append({"entity": path, "status": "failed",
+                                            "error": "SAP did not return the generated product number; child was not sent."})
+                    continue
+                if parent is None:
+                    related_results.append({"entity": path, "status": "failed",
+                                            "error": f"Parent {parent_path} was not created; child was not sent."})
+                    continue
+                try:
+                    payload = _row_payload(row, entity, path, validated_map)
+                    # A parent needed by a populated descendant is still created.
+                    has_descendant = any(other.startswith(path + "/") and
+                        _row_payload(row, metadata["navigation_entities"][other], other, validated_map)
+                        for other in mapped_paths)
+                    if not payload and not has_descendant:
+                        continue
+                    entity_type = metadata["entity_types"][metadata["entity_sets"][entity]]
+                    payload["Product"] = generated_id
+                    for key in entity_type["keys"]:
+                        if key not in payload and key in parent:
+                            payload[key] = parent[key]
+                    if path == "to_Description":
+                        payload.setdefault("Language", DEFAULT_PRODUCT_DESCRIPTION_LANGUAGE)
+                    included_deep_entities = []
+                    supply_payload = None
+                    if path == "to_Plant" and supply_path in mapped_paths:
+                        supply_entity = metadata["navigation_entities"][supply_path]
+                        supply_payload = _row_payload(row, supply_entity, supply_path, validated_map)
+                        if supply_payload:
+                            supply_payload["Product"] = generated_id
+                            if payload.get("Plant"):
+                                supply_payload["Plant"] = payload["Plant"]
+                            supply_type = metadata["entity_types"][metadata["entity_sets"][supply_entity]]
+                            for key in ("MRPType", "MRPResponsible", "ProcurementType"):
+                                if key in supply_type["properties"] and key in payload:
+                                    supply_payload.setdefault(key, payload[key])
+                            supply_required = set(supply_type["keys"]) | supply_type["required_properties"]
+                            supply_missing = sorted(key for key in supply_required
+                                                    if supply_payload.get(key) in (None, ""))
+                            if supply_missing:
+                                raise ValueError(f"Missing required {supply_entity} properties: " + ", ".join(supply_missing))
+                            payload["to_ProductSupplyPlanning"] = supply_payload
+                            included_deep_entities.append("to_ProductSupplyPlanning")
+                    required = set(entity_type["keys"]) | entity_type["required_properties"]
+                    missing = sorted(key for key in required if key not in payload or payload[key] is None or
+                                     (payload[key] == "" and key != "ValuationType"))
+                    if missing:
+                        raise ValueError(f"Missing required {entity} properties: " + ", ".join(missing))
+                    signature = (path, tuple((key, str(payload.get(key, ""))) for key in entity_type["keys"]))
+                    if signature in seen:
+                        previous_payload, previous_status = seen[signature]
+                        if previous_payload != payload:
+                            raise ValueError(f"Conflicting values for the same {entity} key")
+                        if previous_status:
+                            parents[path] = payload
+                            if supply_payload:
+                                parents[supply_path] = supply_payload
+                        else:
+                            raise ValueError(f"Previous {entity} request for this key failed")
+                        continue
+                    if metadata["entity_set_creatable"].get(entity) is False:
+                        raise ValueError(f"{entity} is marked non-creatable in SAP metadata")
+                    response = session.post(f"{root_url}/{entity}", json=payload, **write_options)
+                    seen[signature] = (payload.copy(), response.ok)
+                    result = {"entity": path, "status": "created" if response.ok else "failed",
+                              "http_status": response.status_code, "method": "POST",
+                              "endpoint": f"{PRODUCT_SERVICE_ROOT}/{entity}",
+                              "included_deep_entities": included_deep_entities,
+                              "request_fields": sorted(key for key in payload if not key.startswith("to_")),
+                              "nested_request_fields": {"to_ProductSupplyPlanning": sorted(supply_payload)}
+                              if supply_payload else {}}
+                    if response.ok:
+                        parents[path] = payload
+                        if supply_payload:
+                            parents[supply_path] = supply_payload
+                    else:
+                        result["error"] = _response_error(response)
+                    related_results.append(result)
+                except ValueError as exc:
+                    related_results.append({"entity": path, "status": "failed", "error": str(exc)})
+        if not generated_id and not paths:
+            related_results.append({"entity": "Product", "status": "failed",
+                                    "error": "SAP did not return the generated product number."})
         has_related_errors = any(item["status"] == "failed" for item in related_results)
-        results.append({
-            "source_material": material,
-            "material": generated_id or material,
-            "product_id": generated_id,
-            "root_http_status": create_response.status_code,
-            "root_included_deep_entities": ["to_Description"],
-            "status": "created_with_errors" if has_related_errors else "created",
-            **({"related_results": related_results} if related_results else {}),
-        })
+        results.append({"source_material": material, "material": generated_id or material,
+                        "product_id": generated_id, "root_http_status": create_response.status_code,
+                        "root_included_deep_entities": ["to_Description"],
+                        "status": "created_with_errors" if has_related_errors else "created",
+                        "related_results": related_results,
+                        "ignored_fields": sorted(field for field in ignored_fields
+                                                 if any(row.get(field) not in (None, "") for row in material_rows))})
 
     counts = {}
     for result in results:
