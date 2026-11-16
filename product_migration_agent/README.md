@@ -1,4 +1,4 @@
-# Product Master Migration Agent (Oracle -> S/4HANA)
+# Oracle to SAP-S4HANA Masterdata Migration Workbench Agent (Oracle -> S/4HANA)
 
 Isolated package, same pattern as `customer_base_agent`. Host integration is two lines in `app.py`
 (`include_router(migration_router)`) plus the `ProductMigration` screen in the frontend.

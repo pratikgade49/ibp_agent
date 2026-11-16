@@ -1,0 +1,9 @@
+---
+applications:
+  - name: yash-agentic-ai-landing
+    memory: 64M
+    disk_quota: 256M
+    instances: 1
+    random-route: true
+    buildpacks:
+      - staticfile_buildpack

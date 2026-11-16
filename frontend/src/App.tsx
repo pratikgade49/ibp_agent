@@ -101,7 +101,7 @@ const AGENTS: Array<{
   {
     id: 'migration',
     index: '05',
-    name: 'Product Master Migration',
+    name: 'Oracle to SAP-S4HANA Masterdata Migration Workbench',
     descriptor: 'Oracle to S/4HANA conversion',
     description: 'Upload data, mapping and rules; the agent interprets the rules, translates codes and returns the converted Excel.',
     capabilities: ['AI-compiled rules', 'Automatic code translation', 'Change log and audit trail'],
@@ -788,8 +788,10 @@ function formatDate(value: string): string {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration'>('ibp');
-  const [showAgentDirectory, setShowAgentDirectory] = useState(true);
+  const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration'>(() => {
+    const requested = new URLSearchParams(window.location.search).get('agent');
+    return requested === 's4' || requested === 'maintenance' || requested === 'scenario' || requested === 'migration' ? requested : 'ibp';
+  });
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [connection, setConnection] = useState<'connected' | 'running' | 'offline'>('connected');
@@ -847,12 +849,6 @@ export default function App() {
       setActiveId(null);
     }
     setError('');
-  }
-
-  function openAgent(mode: 'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration') {
-    selectAgentMode(mode);
-    setShowAgentDirectory(false);
-    setHistoryOpen(false);
   }
 
   async function submitQuestion(value: string) {
@@ -933,66 +929,8 @@ export default function App() {
     }
   }
 
-  if (showAgentDirectory) {
-    return (
-      <div className="app-frame agent-directory-frame">
-        <header className="topbar directory-topbar">
-          <div className="brand-lockup">
-            <div className="brand-mark"><img src={yashLogo} alt="YASH Technologies" /></div>
-            <div className="brand-copy"><strong>Yash-SAP AI Agent Dashboard</strong><span>Planners Workspace</span></div>
-          </div>
-          <div className="directory-topbar-label"><span className="directory-live-dot" /> Planning intelligence network</div>
-        </header>
-        <main className="agent-directory">
-          <section className="directory-intro">
-            <video className="directory-hero-video" autoPlay loop muted playsInline aria-hidden="true" preload="metadata"><source src="/static/315302.mp4" type="video/mp4" media="(prefers-reduced-motion: no-preference)" /></video>
-            <div>
-              <span className="directory-kicker"><span /> AGENT WORKSPACES <i /> SAP CONNECTED</span>
-              <h1>Intelligence that moves<br /><span>planning forward.</span></h1>
-              <p>Five specialist agents. One connected workspace for better decisions.</p>
-            </div>
-            <div className="directory-network" aria-hidden="true">
-              <div className="network-core"><Sparkles size={22} /></div>
-              <span className="network-node node-one"><Activity size={15} /></span>
-              <span className="network-node node-two"><Factory size={15} /></span>
-              <span className="network-node node-three"><ShieldCheck size={15} /></span>
-              <span className="network-line line-one" />
-              <span className="network-line line-two" />
-              <span className="network-line line-three" />
-            </div>
-          </section>
-
-          <div className="directory-section-heading"><div><span>YOUR AI WORKFORCE</span><h2>Choose the right specialist.</h2></div><p>Five agents, each built for a different planning task.</p></div>
-          <section className="agent-directory-grid" aria-label="Available agent workspaces">
-            {AGENTS.map((agent) => {
-              const Icon = agent.icon;
-              return (
-                <article className={`directory-agent-card ${agent.tone}`} key={agent.id}>
-                  <div className="directory-card-topline"><span>WORKSPACE {agent.index}</span><span className="directory-card-state">SPECIALIST AGENT</span></div>
-                  <div className="directory-agent-icon"><Icon size={21} strokeWidth={1.8} /></div>
-                  <span className="directory-agent-descriptor">{agent.descriptor}</span>
-                  <h2>{agent.name}</h2>
-                  <p>{agent.description}</p>
-                  <ul>{agent.capabilities.map((capability) => <li key={capability}>{capability}</li>)}</ul>
-                  <button type="button" className="directory-open-button" onClick={() => openAgent(agent.id)}>
-                    {agent.id === 'migration' ? 'Start migration' : agent.id === 'scenario' ? 'Explore scenarios' : agent.id === 's4' ? 'Explore capacity' : agent.id === 'maintenance' ? 'Review maintenance' : 'Analyze demand'} <ArrowRight size={16} />
-                  </button>
-                </article>
-              );
-            })}
-          </section>
-
-          <footer className="directory-footer">
-            <span><i /> SHARED PLANNING FOUNDATION</span>
-            <p>SAP data access <b /> Conversation history <b /> Read-only analysis where applicable</p>
-          </footer>
-        </main>
-      </div>
-    );
-  }
-
   if (agentMode === 'migration') {
-    return <ProductMigration onShowAgents={() => setShowAgentDirectory(true)} />;
+    return <ProductMigration onShowAgents={() => window.location.assign('/#agents')} />;
   }
   if (agentMode === 'scenario') {
     return (
@@ -1002,7 +940,7 @@ export default function App() {
         error={error}
         onAsk={(value) => void submitQuestion(value)}
         onNewConversation={startNewConversation}
-        onShowAgents={() => setShowAgentDirectory(true)}
+        onShowAgents={() => window.location.assign('/#agents')}
       />
     );
   }
@@ -1019,7 +957,7 @@ export default function App() {
           <button type="button" role="radio" aria-checked={agentMode === 'maintenance'} className={agentMode === 'maintenance' ? 'selected' : ''} onClick={() => selectAgentMode('maintenance')} disabled={loading}>Maintenance</button>
         </div>
         <div className="topbar-right">
-          <button type="button" className="directory-return-button" onClick={() => setShowAgentDirectory(true)}><PanelLeftOpen size={15} /> All agents</button>
+          <button type="button" className="directory-return-button" onClick={() => window.location.assign('/#agents')}><PanelLeftOpen size={15} /> All agents</button>
           <span className={`connection-state ${connection}`}><i />{connection === 'running' ? 'Analyzing' : connection === 'offline' ? 'Agent unavailable' : 'Agent connected'}</span>
           <button className="icon-button history-toggle" aria-label="Toggle conversation history" title="Toggle conversation history" onClick={toggleHistory}>
             {historyCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
@@ -1040,7 +978,7 @@ export default function App() {
               <button
                 className={`history-entry ${conversation.id === activeId ? 'selected' : ''}`}
                 key={conversation.id}
-                onClick={() => { setActiveId(conversation.id); setAgentMode(conversation.agentMode || 'ibp'); setShowAgentDirectory(false); setError(''); setHistoryOpen(false); }}
+                onClick={() => { setActiveId(conversation.id); setAgentMode(conversation.agentMode || 'ibp'); setError(''); setHistoryOpen(false); }}
                 disabled={loading}
               >
                 <span className="history-entry-title">{conversation.title}</span>

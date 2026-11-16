@@ -1,4 +1,4 @@
-"""Static configuration for the Product Master migration agent."""
+"""Static configuration for the Oracle to SAP-S4HANA Masterdata Migration Workbench agent."""
 import os
 import tempfile
 from pathlib import Path
