@@ -4,7 +4,7 @@ import './product-migration.css';
 import oracleLogo from './assets/oracle-logo.svg';
 import sapLogo from './assets/sap-logo.svg';
 import GenieMascot from './GenieMascot';
-import { VoiceInput, SpeakResponse } from './VoiceControls';
+import { VoiceConversation, SpeakResponse } from './VoiceControls';
 
 interface Summary {
   records: number;
@@ -122,15 +122,18 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
       const parsed = payload as ConvertResponse;
       setResult(parsed);
       setPushResult(null);
+      const reply = correctionText
+          ? (parsed.summary.correction_message || (parsed.summary.correction_applied ? 'Correction applied. Updated workbook is ready.' : 'No correction was applied.'))
+          : 'Conversion finished. Review the preview and download the Excel file.';
       setMessages((current) => [...current, {
         id: crypto.randomUUID(),
         role: 'assistant',
-        text: correctionText
-          ? (parsed.summary.correction_message || (parsed.summary.correction_applied ? 'Correction applied. Updated workbook is ready.' : 'No correction was applied.'))
-          : 'Conversion finished. Review the preview and download the Excel file.',
+        text: reply,
       }]);
+      return reply;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Conversion failed.');
+      return 'I could not complete the conversion. Please check the error shown on screen.';
     } finally {
       setLoading(false);
     }
@@ -144,12 +147,12 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
     await runConversion();
   }
 
-  async function applyCorrection() {
-    const value = correction.trim();
+  async function applyCorrection(input = correction) {
+    const value = input.trim();
     if (!value || !ready || loading) return;
     setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', text: value }]);
     setCorrection('');
-    await runConversion(value);
+    return await runConversion(value);
   }
 
   async function pushToS4() {
@@ -350,7 +353,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                     placeholder="Example: set BESKZ to E or set DISMM to PD"
                     rows={3}
                   />
-                  <VoiceInput value={correction} onChange={setCorrection} disabled={loading} />
+                  <VoiceConversation onSubmit={applyCorrection} disabled={loading} />
                   <button type="button" className="pm-run" onClick={() => void applyCorrection()} disabled={loading || !correction.trim()}>
                     <Send size={15} /> Apply
                   </button>

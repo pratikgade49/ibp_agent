@@ -1,6 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { VoiceInput, SpeakResponse } from './VoiceControls';
+import { VoiceConversation, SpeakResponse } from './VoiceControls';
 import remarkGfm from 'remark-gfm';
 import yashLogo from './assets/Yash logo.jpg';
 import jouleLogo from './assets/sap-joule-logo.svg';
@@ -854,7 +854,7 @@ export default function App() {
 
   async function submitQuestion(value: string) {
     const message = value.trim();
-    if (!message || loading) return;
+    if (!message || loading) return undefined;
     setQuestion('');
     setError('');
     setLoading(true);
@@ -900,6 +900,7 @@ export default function App() {
         messages: [...optimistic.messages, assistantMessage],
       });
       setConnection('connected');
+      return assistantMessage.content;
     } catch (requestError) {
       const detail = requestError instanceof Error ? requestError.message : 'Unexpected request error';
       setError(detail);
@@ -913,6 +914,7 @@ export default function App() {
         }],
       });
       setConnection('offline');
+      return `I couldn't complete that analysis. ${detail}`;
     } finally {
       setLoading(false);
     }
@@ -939,7 +941,7 @@ export default function App() {
         messages={messages}
         loading={loading}
         error={error}
-        onAsk={(value) => void submitQuestion(value)}
+        onAsk={submitQuestion}
         onNewConversation={startNewConversation}
         onShowAgents={() => window.location.assign('/#agents')}
       />
@@ -1094,7 +1096,7 @@ export default function App() {
                 aria-label={`Message ${chatAgentName}`}
                 disabled={loading}
               />
-              <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><VoiceInput value={question} onChange={setQuestion} disabled={loading} /><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
+              <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><VoiceConversation key={agentMode} onSubmit={submitQuestion} disabled={loading} /><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
             </form></div>
             <p className="privacy-note">{agentMode === 'maintenance' ? 'Read-only S/4 maintenance schedule data.' : agentMode === 's4' ? 'Read-only S/4 capacity data.' : 'Analysis is based on available planning data.'}</p>
           </div>

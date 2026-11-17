@@ -6,13 +6,13 @@ import type { ChatMessage } from './types';
 import ScenarioForecastPreview from './ScenarioForecastPreview';
 import './scenario-test-agent.css';
 import GenieMascot from './GenieMascot';
-import { VoiceInput, SpeakResponse } from './VoiceControls';
+import { VoiceConversation, SpeakResponse } from './VoiceControls';
 
 interface ScenarioTestAgentProps {
   messages: ChatMessage[];
   loading: boolean;
   error: string;
-  onAsk: (message: string) => void;
+  onAsk: (message: string) => Promise<string | undefined>;
   onNewConversation: () => void;
   onShowAgents: () => void;
 }
@@ -33,7 +33,7 @@ export default function ScenarioTestAgent({
     const text = value.trim();
     if (!text || loading) return;
     setDraft('');
-    onAsk(text);
+    void onAsk(text);
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -104,7 +104,7 @@ export default function ScenarioTestAgent({
             />
             <div className="scenario-composer-footer">
               <span>Version and scenario IDs are used for read and write</span>
-              <VoiceInput value={draft} onChange={setDraft} disabled={loading} />
+              <VoiceConversation onSubmit={onAsk} disabled={loading} />
               <button type="submit" aria-label="Send request" disabled={!draft.trim() || loading}><Send size={16} /></button>
             </div>
           </form></div>
