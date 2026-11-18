@@ -15,10 +15,12 @@ from agent.s4_capacity_graph import run_s4_agent_with_data
 from agent.maintenance_graph import run_maintenance_agent_with_data
 from customer_base_agent.graph import run_customer_base_agent
 from product_migration_agent.api import router as migration_router
+from ewm_queue_agent.api import router as ewm_router
 from rag.sharepoint_knowledge import start_sync_worker
 
 app = FastAPI(title="IBP Demand Planning Agent")
 app.include_router(migration_router)
+app.include_router(ewm_router)
 
 @app.on_event("startup")
 def start_knowledge_sync():

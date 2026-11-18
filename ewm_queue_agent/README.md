@@ -1,0 +1,9 @@
+# EWM queue monitoring
+
+This read-only agent retrieves `MsgQueueSet` from `ZEWM_MSG_QUEUE_MON_SRV` and shows SAP's error and suggested checks. Suggestions are hypotheses, not confirmed root causes. Resolve issues and reprocess queues in SAP under your normal procedures.
+
+The agent uses the existing S/4 connection configuration: `S4_DESTINATION_NAME` and its BTP Destination/Connectivity bindings, or `S4_BASE_URL`, `S4_USER`, and `S4_PASSWORD` for direct access. Ensure the configured destination points to the SAP system hosting the supplied service and that the service and user's authorizations are active. Optionally set `EWM_QUEUE_SERVICE_ROOT` to a different relative service path. No credentials are stored in this folder.
+
+`GET /api/ewm/queues?warehouse=5070` filters on `Lgnum`, the filterable warehouse field in the supplied metadata. Results are limited to 1,000 records and the response flags truncation. Direction is derived from SAP's direction/type fields; if unavailable, users are directed to check SMQ1 or SMQ2.
+
+Optional `date_from` and `date_to` ISO dates filter `Creadate` inclusively; a single date uses equality. Open-ended ranges use SAP's `ge` or `le` predicate. For a bounded range SAP receives the lower bound and the agent applies the upper bound locally; the provided examples establish that each predicate works separately, not that they work in combination. At most 1,000 SAP records are examined; if more exist, results are marked truncated even if fewer than 1,000 match the upper bound. The chat resolves relative dates using the browser's local calendar date. “Last N days” includes today, “last week” is the previous Monday through Sunday, and “last month” is the preceding calendar month. Other natural-language expressions use the configured LLM and may require clarification. The supplied metadata marks `Creadate` as non-filterable, despite the working examples; verify the deployed service's actual behavior.

@@ -39,6 +39,7 @@ import type { AskResponse, ChatMessage, Conversation, DataRecord, Insight } from
 import ScenarioTestAgent from './ScenarioTestAgent';
 import ProductMigration from './ProductMigration';
 import GenieMascot from './GenieMascot';
+import EwmQueueAgent from './EwmQueueAgent';
 
 const STORAGE_KEY = 'ibp-demand-desk-conversations-v1';
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -787,6 +788,11 @@ function formatDate(value: string): string {
 }
 
 export default function App() {
+  if (new URLSearchParams(window.location.search).get('agent') === 'ewm') return <EwmQueueAgent />;
+  return <PlanningApp />;
+}
+
+function PlanningApp() {
   const [conversations, setConversations] = useState<Conversation[]>(readConversations);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration'>(() => {
