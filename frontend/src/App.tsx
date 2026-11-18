@@ -1096,7 +1096,7 @@ export default function App() {
                 aria-label={`Message ${chatAgentName}`}
                 disabled={loading}
               />
-              <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><VoiceConversation key={agentMode} onSubmit={submitQuestion} disabled={loading} /><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
+              <div className="composer-controls"><span>Enter to send <i /> Shift + Enter for a new line</span><VoiceConversation key={agentMode} onSubmit={submitQuestion} disabled={loading} greeting={`Hey, I'm your ${chatAgentName}. ${agentMode === 'maintenance' ? 'I can help you review maintenance schedules and their impact on production.' : agentMode === 's4' ? 'I can help you explore work-center capacity and bottlenecks.' : 'I can help you explore forecasts, anomalies, and planning data.'} How can I help you today?`} /><button type="submit" aria-label="Send message" disabled={!question.trim() || loading}><Send size={16} /></button></div>
             </form></div>
             <p className="privacy-note">{agentMode === 'maintenance' ? 'Read-only S/4 maintenance schedule data.' : agentMode === 's4' ? 'Read-only S/4 capacity data.' : 'Analysis is based on available planning data.'}</p>
           </div>

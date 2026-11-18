@@ -104,7 +104,7 @@ export default function ScenarioTestAgent({
             />
             <div className="scenario-composer-footer">
               <span>Version and scenario IDs are used for read and write</span>
-              <VoiceConversation onSubmit={onAsk} disabled={loading} />
+              <VoiceConversation onSubmit={onAsk} disabled={loading} greeting="Hey, I'm your IBP Scenario Test Agent. I can help you explore and test planning scenarios. How can I help you today?" />
               <button type="submit" aria-label="Send request" disabled={!draft.trim() || loading}><Send size={16} /></button>
             </div>
           </form></div>

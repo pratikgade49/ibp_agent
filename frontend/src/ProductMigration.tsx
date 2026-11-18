@@ -353,7 +353,7 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
                     placeholder="Example: set BESKZ to E or set DISMM to PD"
                     rows={3}
                   />
-                  <VoiceConversation onSubmit={applyCorrection} disabled={loading} />
+                  <VoiceConversation onSubmit={applyCorrection} disabled={loading} greeting="Hey, I'm your Oracle to SAP product migration agent. I can help you correct product data for migration. What would you like to change?" />
                   <button type="button" className="pm-run" onClick={() => void applyCorrection()} disabled={loading || !correction.trim()}>
                     <Send size={15} /> Apply
                   </button>

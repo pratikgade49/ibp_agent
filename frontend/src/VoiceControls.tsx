@@ -64,7 +64,7 @@ export function SpeakResponse({ text }: { text: string }) {
   return <button type="button" className="voice-speak" disabled={!supported} onClick={toggle} aria-label={speaking ? 'Stop spoken response' : 'Read response aloud'} title={supported ? 'Read response aloud' : 'Spoken responses are unavailable in this browser'}>{speaking ? <VolumeX size={15} /> : <Volume2 size={15} />}{speaking ? 'Stop' : 'Listen'}</button>;
 }
 
-export function VoiceConversation({ onSubmit, disabled = false }: { onSubmit: (text: string) => Promise<string | undefined>; disabled?: boolean }) {
+export function VoiceConversation({ onSubmit, greeting, disabled = false }: { onSubmit: (text: string) => Promise<string | undefined>; greeting: string; disabled?: boolean }) {
   const [phase, setPhase] = useState<'off' | 'listening' | 'thinking' | 'speaking'>('off');
   const [error, setError] = useState('');
   const active = useRef(false);
@@ -138,7 +138,12 @@ export function VoiceConversation({ onSubmit, disabled = false }: { onSubmit: (t
     setError(''); active.current = true;
     const token = ++generation.current;
     window.speechSynthesis.cancel();
-    listen(token);
+    const speech = new SpeechSynthesisUtterance(greeting);
+    speech.onend = () => { if (active.current && generation.current === token) listen(token); };
+    speech.onerror = () => { if (active.current && generation.current === token) { setError('Could not play the greeting. Select Start voice conversation to try again.'); stop(); } };
+    setPhase('speaking');
+    window.speechSynthesis.speak(speech);
   }
+  useEffect(() => { if (supported) toggle(); }, []);
   return <div className="voice-conversation"><button type="button" className="voice-conversation-button" onClick={toggle} disabled={!supported || (disabled && phase === 'off')} aria-pressed={phase !== 'off'}><Mic size={16} />{phase === 'off' ? 'Start voice conversation' : 'End voice conversation'}</button><span className="voice-status" role="status">{!supported ? 'Voice conversation is unavailable in this browser.' : phase === 'listening' ? 'Listening…' : phase === 'thinking' ? 'Agent is thinking…' : phase === 'speaking' ? 'Agent is speaking…' : ''}</span>{error && <span className="voice-status" role="alert">{error}</span>}</div>;
 }
