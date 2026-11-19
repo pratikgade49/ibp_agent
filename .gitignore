@@ -9,3 +9,4 @@ frontend/static/build/
 *.tsbuildinfo
 *.mp4
 *.webm
+rag-memory.sqlite3*

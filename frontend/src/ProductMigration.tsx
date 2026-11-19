@@ -1,4 +1,5 @@
 import { FormEvent, useState } from 'react';
+import { saveConversationTurn } from './conversation-memory';
 import { ArrowLeft, CloudUpload, Download, FileSpreadsheet, Loader2, MessageSquareText, Send, Upload } from 'lucide-react';
 import './product-migration.css';
 import oracleLogo from './assets/oracle-logo.svg';
@@ -91,6 +92,7 @@ const SLOTS = [
 type SlotKey = (typeof SLOTS)[number]['key'];
 
 export default function ProductMigration({ onShowAgents }: ProductMigrationProps) {
+  const [memoryConversationId] = useState(() => crypto.randomUUID());
   const [files, setFiles] = useState<Partial<Record<SlotKey, File>>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -130,10 +132,14 @@ export default function ProductMigration({ onShowAgents }: ProductMigrationProps
         role: 'assistant',
         text: reply,
       }]);
+      if (!await saveConversationTurn('migration', memoryConversationId, correctionText || 'Run migration with the selected files.', reply)) setError('Conversion completed, but the conversation could not be saved to memory.');
       return reply;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Conversion failed.');
-      return 'I could not complete the conversion. Please check the error shown on screen.';
+      const reply = 'I could not complete the conversion. Please check the error shown on screen.';
+      setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'assistant', text: reply }]);
+      if (!await saveConversationTurn('migration', memoryConversationId, correctionText || 'Run migration with the selected files.', reply)) setError('Conversion failed and the conversation could not be saved to memory.');
+      return reply;
     } finally {
       setLoading(false);
     }

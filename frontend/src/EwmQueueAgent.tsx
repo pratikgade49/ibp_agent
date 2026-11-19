@@ -1,5 +1,6 @@
 ﻿import { FormEvent, useEffect, useState } from 'react';
 import { ArrowLeft, RefreshCw, Search, Warehouse, AlertCircle } from 'lucide-react';
+import { saveConversationTurn } from './conversation-memory';
 import './ewm-queue-agent.css';
 type Queue = { Lgnum?: string; Qname?: string; Qstate?: string; Direction?: string; Mtypetext?: string; Busobj?: string; BusobjKey?: string; Errmess?: string; Msgid?: string; Msgno?: string; Wqname?: string; Dest?: string; Creadate?: string; EntriesInQueue?: number; MqDescription?: string; guidance?: string[]; transaction?: string };
 type Result = { queues: Queue[]; count: number; truncated?: boolean };
@@ -8,6 +9,7 @@ function display(value: unknown) { return value === undefined || value === null 
 function displayDate(value?: string) { if (!value) return '—'; const match = /^\/Date\((-?\d+)(?:[+-]\d+)?\)\/$/.exec(value); if (match) { const date = new Date(Number(match[1])); return Number.isNaN(date.getTime()) ? value : date.toISOString().slice(0, 10); } return value.slice(0, 10); }
 function direction(q: Queue) { return q.Mtypetext || q.Direction?.match(/\\Q([^@]+)/)?.[1] || q.Direction || 'Unknown'; }
 export default function EwmQueueAgent() {
+  const [memoryConversationId] = useState(() => crypto.randomUUID());
   const [message, setMessage] = useState(''); const [scope, setScope] = useState('');
   const [chat, setChat] = useState<{role: 'agent' | 'user'; text: string}[]>([{role: 'agent', text: 'Which warehouse would you like to monitor? You can also include a creation date or range, such as today or last 3 days.'}]);
   const [result, setResult] = useState<Result | null>(null); const [selected, setSelected] = useState<number | null>(null);
@@ -20,8 +22,9 @@ export default function EwmQueueAgent() {
       const response = await fetch(`/api/ewm/queues${params.size ? `?${params}` : ''}`);
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`); }
       const data: Result = await response.json(); setResult(data); setSelected(data.queues.length ? 0 : null);
-      setChat(previous => [...previous, {role: 'agent', text: `SAP returned ${data.count} queue${data.count === 1 ? '' : 's'} for warehouse ${value}${dateFrom || dateTo ? ` (creation date: ${dateFrom || 'any start'} to ${dateTo || 'any end'})` : ' (all creation dates)'}.${data.truncated ? ' SAP results exceeded the 1,000-record scan limit, so some matching queues may be missing.' : ''} Select a queue below to see its reported error and suggested checks.`}]);
-    } catch (e) { const detail = e instanceof Error ? e.message : 'Unable to load queues.'; setError(detail); setChat(previous => [...previous, {role: 'agent', text: detail}]); } finally { setLoading(false); }
+      const reply = `SAP returned ${data.count} queue${data.count === 1 ? '' : 's'} for warehouse ${value}${dateFrom || dateTo ? ` (creation date: ${dateFrom || 'any start'} to ${dateTo || 'any end'})` : ' (all creation dates)'}.${data.truncated ? ' SAP results exceeded the 1,000-record scan limit, so some matching queues may be missing.' : ''} Select a queue below to see its reported error and suggested checks.`;
+      setChat(previous => [...previous, {role: 'agent', text: reply}]); return reply;
+    } catch (e) { const detail = e instanceof Error ? e.message : 'Unable to load queues.'; setError(detail); setChat(previous => [...previous, {role: 'agent', text: detail}]); return detail; } finally { setLoading(false); }
   }
   async function submit(e: FormEvent) {
     e.preventDefault(); const input = message.trim(); if (!input || loading) return;
@@ -31,8 +34,9 @@ export default function EwmQueueAgent() {
       const response = await fetch('/api/ewm/interpret', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input, warehouse: scope, today})});
       const data = await response.json();
       if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not understand the request.');
-      setFilter(''); await load(data.warehouse, data.date_from, data.date_to);
-    } catch (e) { setChat(previous => [...previous, {role: 'agent', text: e instanceof Error ? e.message : 'Could not understand the request.'}]); setLoading(false); }
+      setFilter(''); const reply = await load(data.warehouse, data.date_from, data.date_to);
+      if (!await saveConversationTurn('ewm', memoryConversationId, input, reply)) setError('The conversation could not be saved to memory.');
+    } catch (e) { const reply = e instanceof Error ? e.message : 'Could not understand the request.'; setChat(previous => [...previous, {role: 'agent', text: reply}]); if (!await saveConversationTurn('ewm', memoryConversationId, input, reply)) setError('The conversation could not be saved to memory.'); setLoading(false); }
   }
   const queues = result?.queues || [];
   const matches = queues.map((queue, index) => ({ queue, index })).filter(({ queue }) => [queue.Qname, queue.Busobj, queue.BusobjKey, queue.Errmess, queue.Qstate, queue.Lgnum].some(v => String(v || '').toLowerCase().includes(filter.toLowerCase())));

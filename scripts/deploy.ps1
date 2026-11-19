@@ -1,5 +1,7 @@
 param(
   [string]$VarsFile,
+  [string]$MemoryServiceOffering = 'postgresql-db',
+  [string]$MemoryServicePlan = 'trial',
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$CfPushArgs = @()
 )
@@ -25,7 +27,8 @@ $resolvedVarsFile = (Resolve-Path $VarsFile).Path
 $manifestFile = Join-Path $repoRoot 'manifest.yaml'
 $requiredServices = @(
   @{ Offering = 'connectivity'; Plan = 'lite'; Name = 'ibp-connectivity' },
-  @{ Offering = 'destination'; Plan = 'lite'; Name = 'ibp-destination' }
+  @{ Offering = 'destination'; Plan = 'lite'; Name = 'ibp-destination' },
+  @{ Offering = $MemoryServiceOffering; Plan = $MemoryServicePlan; Name = 'rag-memory-db' }
 )
 $requiredVars = @(
   'llm-provider', 'aws-region', 'bedrock-model', 'aws-bearer-token-bedrock',
