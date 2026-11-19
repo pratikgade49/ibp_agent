@@ -65,34 +65,28 @@ def test_date_filters(get, config):
     fetch_queues("5070", date(2026, 3, 8), date(2026, 3, 8))
     assert get.call_args.kwargs["params"]["$filter"] == "Lgnum eq '5070' and Creadate eq datetime'2026-03-08T00:00:00'"
     fetch_queues("5070", date(2026, 3, 1), date(2026, 3, 8))
-    assert get.call_args.kwargs["params"]["$filter"] == "Lgnum eq '5070' and Creadate ge datetime'2026-03-01T00:00:00'"
+    assert get.call_args.kwargs["params"]["$filter"] == "Lgnum eq '5070' and Creadate ge datetime'2026-03-01T00:00:00' and Creadate le datetime'2026-03-08T23:59:59'"
     fetch_queues("5070", None, date(2026, 1, 27))
-    assert get.call_args.kwargs["params"]["$filter"] == "Lgnum eq '5070' and Creadate le datetime'2026-01-27T00:00:00'"
+    assert get.call_args.kwargs["params"]["$filter"] == "Lgnum eq '5070' and Creadate le datetime'2026-01-27T23:59:59'"
+    fetch_queues("5070", date(2026, 1, 27), date(2026, 3, 8))
+    assert get.call_args.kwargs["params"]["$filter"] == "Lgnum eq '5070' and Creadate ge datetime'2026-01-27T00:00:00' and Creadate le datetime'2026-03-08T23:59:59'"
 
 
 @patch("ewm_queue_agent.service._s4_request_config", return_value=("https://sap.example", {"timeout": 5}))
 @patch("ewm_queue_agent.service.requests.get")
-def test_range_applies_end_date_across_pages(get, config):
-    get.side_effect = [response([{"Qname": "inside", "Creadate": "/Date(1772928000000)/"}], "?page=2"), response([{"Qname": "later", "Creadate": "2026-03-09T00:00:00"}])]
+def test_range_collects_sap_filtered_pages(get, config):
+    get.side_effect = [response([{"Qname": "first", "Creadate": "/Date(1772928000000)/"}], "?page=2"), response([{"Qname": "second", "Creadate": "2026-03-07T00:00:00"}])]
     result = fetch_queues("5070", date(2026, 3, 1), date(2026, 3, 8))
-    assert [row["Qname"] for row in result["queues"]] == ["inside"]
+    assert [row["Qname"] for row in result["queues"]] == ["first", "second"]
     assert not result["truncated"]
 
 
 @patch("ewm_queue_agent.service._s4_request_config", return_value=("https://sap.example", {"timeout": 5}))
 @patch("ewm_queue_agent.service.requests.get")
-def test_invalid_date_does_not_silently_exclude_queue(get, config):
-    get.return_value = response([{"Creadate": "invalid"}])
-    with pytest.raises(RuntimeError, match="invalid creation date"):
-        fetch_queues("5070", date(2026, 3, 1), date(2026, 3, 8))
-
-
-@patch("ewm_queue_agent.service._s4_request_config", return_value=("https://sap.example", {"timeout": 5}))
-@patch("ewm_queue_agent.service.requests.get")
-def test_truncation_reflects_scanned_rows_not_matching_rows(get, config):
+def test_truncation_reflects_sap_rows(get, config):
     get.return_value = response([{"Creadate": "2026-04-01T00:00:00"}] * 1001)
     result = fetch_queues("5070", date(2026, 3, 1), date(2026, 3, 8))
-    assert result["count"] == 0
+    assert result["count"] == 1000
     assert result["truncated"] is True
 
 

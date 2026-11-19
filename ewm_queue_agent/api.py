@@ -7,6 +7,7 @@ import requests
 
 from .service import fetch_queues
 from .interpret import interpret_request
+from .community import find_solutions
 
 router = APIRouter(prefix="/api/ewm", tags=["ewm-queue"])
 log = logging.getLogger(__name__)
@@ -30,6 +31,17 @@ class InterpretRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     warehouse: str = Field(default="", max_length=4)
     today: date
+
+
+class CommunityRequest(BaseModel):
+    error: str = Field(default="", max_length=300)
+    msgid: str = Field(default="", max_length=20)
+    msgno: str = Field(default="", max_length=3)
+
+
+@router.post("/community")
+def community(body: CommunityRequest):
+    return find_solutions(body.error, body.msgid, body.msgno)
 
 
 @router.post("/interpret")

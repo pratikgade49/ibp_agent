@@ -1,7 +1,5 @@
 """Fetch and interpret the custom EWM queue monitoring OData service."""
 import os
-import re
-from datetime import date, datetime, timezone
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -10,18 +8,6 @@ from agent.s4_capacity_tools import _s4_request_config
 
 SERVICE_ROOT = "/sap/opu/odata/sap/ZEWM_MSG_QUEUE_MON_SRV"
 MAX_QUEUES = 1000
-
-
-def _creation_date(value):
-    if not isinstance(value, str):
-        raise RuntimeError("SAP returned a queue with an invalid creation date; the requested date range cannot be applied safely")
-    match = re.fullmatch(r"/Date\((-?\d+)(?:[+-]\d{4})?\)/", value)
-    try:
-        if match:
-            return datetime.fromtimestamp(int(match.group(1)) / 1000, tz=timezone.utc).date()
-        return date.fromisoformat(value[:10])
-    except (ValueError, OverflowError, OSError) as exc:
-        raise RuntimeError("SAP returned a queue with an invalid creation date; the requested date range cannot be applied safely") from exc
 
 
 def diagnose(row):
@@ -64,8 +50,8 @@ def fetch_queues(warehouse="", date_from=None, date_to=None):
     else:
         if date_from:
             filters.append(f"Creadate ge datetime'{date_from.isoformat()}T00:00:00'")
-        elif date_to:
-            filters.append(f"Creadate le datetime'{date_to.isoformat()}T00:00:00'")
+        if date_to:
+            filters.append(f"Creadate le datetime'{date_to.isoformat()}T23:59:59'")
     if filters:
         params["$filter"] = " and ".join(filters)
     origin = urlsplit(url)
@@ -100,8 +86,4 @@ def fetch_queues(warehouse="", date_from=None, date_to=None):
             url = None
     truncated = len(rows) > MAX_QUEUES or bool(next_link)
     rows = rows[:MAX_QUEUES]
-    # This service is known to accept a lower-bound date filter. Apply the
-    # upper bound locally so a range does not depend on SAP accepting both.
-    if date_from and date_to and date_from != date_to:
-        rows = [row for row in rows if _creation_date(row.get("Creadate")) <= date_to]
     return {"queues": [diagnose(row) for row in rows], "count": len(rows), "truncated": truncated}
