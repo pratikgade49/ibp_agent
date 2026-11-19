@@ -44,7 +44,14 @@ if ($missingVars.Count -gt 0) {
 }
 
 Push-Location $repoRoot
+$authVarsFile = $null
 try {
+  if (-not (Get-Command python -ErrorAction SilentlyContinue)) { throw 'Python is required to prepare the initial admin configuration.' }
+  if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw 'Node.js and npm are required to build the frontend.' }
+  $authVarsFile = & python -m auth.deploy_vars
+  if ($LASTEXITCODE -ne 0 -or -not $authVarsFile) { throw 'Set AUTH_ADMIN_USERNAME and AUTH_ADMIN_PASSWORD in the root .env file before deploying.' }
+  & npm --prefix frontend run build
+  if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed; deployment was not started.' }
   $servicesOutput = & cf services 2>&1
   if ($LASTEXITCODE -ne 0) {
     throw "Could not list Cloud Foundry services: $($servicesOutput -join [Environment]::NewLine)"
@@ -65,7 +72,7 @@ try {
     }
   }
 
-  $pushArgs = @('--vars-file', $resolvedVarsFile, '--redact-env') + $CfPushArgs
+  $pushArgs = @('--vars-file', $resolvedVarsFile, '--vars-file', $authVarsFile, '--redact-env') + $CfPushArgs
   if (Test-Path $manifestFile) {
     $pushArgs = @('--manifest', $manifestFile) + $pushArgs
   }
@@ -75,5 +82,6 @@ try {
   }
 }
 finally {
+  if ($authVarsFile) { Remove-Item -LiteralPath $authVarsFile -Force -ErrorAction SilentlyContinue }
   Pop-Location
 }

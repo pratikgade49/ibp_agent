@@ -65,11 +65,34 @@ class ConversationMemory:
             )""")
             self._execute(conn, "CREATE INDEX IF NOT EXISTS rag_chat_conversation_idx ON rag_chat_turns (agent, conversation_id, created_at, turn_id)")
             self._execute(conn, "CREATE INDEX IF NOT EXISTS rag_chat_agent_idx ON rag_chat_turns (agent, created_at, turn_id)")
+            self._execute(conn, """CREATE TABLE IF NOT EXISTS rag_agent_summaries (
+                agent TEXT PRIMARY KEY, watermark_time TEXT NOT NULL, watermark_id TEXT NOT NULL,
+                summary TEXT NOT NULL, turn_count INTEGER NOT NULL)""")
+            self._execute(conn, """CREATE TABLE IF NOT EXISTS rag_feedback (
+                feedback_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL, username TEXT NOT NULL,
+                rating TEXT NOT NULL, correction TEXT NOT NULL, created_at TEXT NOT NULL,
+                FOREIGN KEY (turn_id) REFERENCES rag_chat_turns(turn_id))""")
 
     def save_turn(self, agent: str, conversation_id: str, question: str, answer: str):
+        turn_id = str(uuid4())
         with self.connection() as conn:
             self._execute(conn, "INSERT INTO rag_chat_turns (turn_id, agent, conversation_id, created_at, user_text, assistant_text) VALUES (?, ?, ?, ?, ?, ?)",
-                          (str(uuid4()), agent, conversation_id, datetime.now(timezone.utc).isoformat(timespec="microseconds"), question, answer))
+                          (turn_id, agent, conversation_id, datetime.now(timezone.utc).isoformat(timespec="microseconds"), question, answer))
+        return turn_id
+
+    def add_feedback(self, turn_id: str, username: str, rating: str, correction: str):
+        if rating not in {'helpful', 'unhelpful'} or len(correction) > 5000:
+            raise ValueError('Invalid feedback.')
+        with self.connection() as conn:
+            if not self._execute(conn, 'SELECT turn_id FROM rag_chat_turns WHERE turn_id = ?', (turn_id,)).fetchone():
+                raise ValueError('Conversation turn not found.')
+            self._execute(conn, 'INSERT INTO rag_feedback (feedback_id, turn_id, username, rating, correction, created_at) VALUES (?, ?, ?, ?, ?, ?)', (str(uuid4()), turn_id, username, rating, correction, datetime.now(timezone.utc).isoformat()))
+
+    def list_feedback(self, limit: int = 100):
+        with self.connection() as conn:
+            rows = self._execute(conn, 'SELECT f.feedback_id, f.turn_id, f.username, f.rating, f.correction, f.created_at, t.agent, t.user_text, t.assistant_text FROM rag_feedback f JOIN rag_chat_turns t ON f.turn_id = t.turn_id ORDER BY f.created_at DESC LIMIT ?', (limit,)).fetchall()
+        keys = ('feedback_id', 'turn_id', 'username', 'rating', 'correction', 'created_at', 'agent', 'question', 'answer')
+        return [dict(zip(keys, row)) for row in rows]
 
     def history(self, agent: str, conversation_id: str, limit: int = 30) -> list[dict]:
         with self.connection() as conn:

@@ -76,6 +76,7 @@ def test_archived_context_is_passed_to_agent(tmp_path, monkeypatch):
     store.save_turn('ibp', 'old', 'Reference code PLANNER-4827', 'Reference code PLANNER-4827')
     store.save_turn('s4', 'old', 'Reference code OTHER', 'Reference code OTHER')
     monkeypatch.setattr(application, 'MEMORY', store)
+    monkeypatch.setattr(application, 'refresh_summary', lambda *_: None)
     history = application._history('ibp', 'new', {}, 'What reference code did I provide?')
     assert 'PLANNER-4827' in history[-1]['content']
     assert 'OTHER' not in history[-1]['content']
@@ -106,6 +107,8 @@ def test_previous_conversation_with_no_other_session(tmp_path):
 def test_api_records_main_and_browser_agent_turns(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     import app as application
+    monkeypatch.setenv('AUTH_ENABLED', 'false')
+    monkeypatch.setattr(application, 'refresh_summary', lambda *_: None)
     store = ConversationMemory('sqlite:///' + str(tmp_path / 'api.sqlite3'))
     monkeypatch.setattr(application, 'MEMORY', store)
     for name in ('run_agent_with_data', 'run_s4_agent_with_data', 'run_maintenance_agent_with_data', 'run_customer_base_agent'):

@@ -34,19 +34,24 @@ EWM and migration exchanges are submitted by their browser screens after each
 exchange; failures, closing the page, or network interruption can prevent those
 submissions. Previously held in-memory conversations and browser-local chat
 history are not imported. Only turns completed after configuration are stored.
-Recent turns are loaded by conversation ID and agent for ongoing context. For
+Recent turns are loaded by conversation ID and agent for ongoing context. A
+persisted per-agent summary incrementally folds in all stored turns, with a
+coverage count and timestamp. It refreshes when the agent is queried, using the
+configured LLM; this adds model calls and cost. Individual long turns and the
+overall summary are compressed, so details may be omitted. If summary generation
+fails, recent history and retrieved excerpts remain available. For
 the four main chat agents, up to two matching archived turns from the same agent
 (including other conversations) are retrieved by keyword as untrusted historical
-context. All users share this history because the app has no user authentication.
+context. Authenticated users share this history by design.
 Other agents' histories are not searched. Matching scans all saved turns for the
 agent and is intended for a small pilot; an indexed search is needed at scale.
 Requests for the previous conversation select the latest other conversation for
 the same agent and include its last four exchanges; long answers retain their
-beginning and end. With no authentication, "previous" is the latest conversation
+beginning and end. "Previous" is the latest conversation
 from any user of that agent, not necessarily the requester's previous session.
 This does not train a model. EWM and migration
 memory is capture only and is not yet used for their context. Conversation IDs
-are not authentication. The application does not currently identify users or
-enforce ownership of conversations, so protect access at the application or
-platform boundary before using this for sensitive conversations. Configure
+are not a user ownership boundary. Helpful/unhelpful feedback and optional
+corrections are stored separately for administrator review, and are not used
+automatically for training. Configure
 backup, retention and deletion policies in the chosen database.

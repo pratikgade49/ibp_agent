@@ -10,6 +10,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   insights?: Insight[];
+  memory_turn_id?: string | null;
 }
 
 export interface Conversation {
@@ -25,4 +26,5 @@ export interface AskResponse {
   reply: string;
   insights: Insight[];
   conversation_id: string;
+  memory_turn_id?: string | null;
 }

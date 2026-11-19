@@ -40,6 +40,7 @@ import ScenarioTestAgent from './ScenarioTestAgent';
 import ProductMigration from './ProductMigration';
 import GenieMascot from './GenieMascot';
 import EwmQueueAgent from './EwmQueueAgent';
+import FeedbackControls from './FeedbackControls';
 
 const STORAGE_KEY = 'ibp-demand-desk-conversations-v1';
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -124,9 +125,9 @@ function asRecords(value: unknown): DataRecord[] {
     : [];
 }
 
-function readConversations(): Conversation[] {
+function readConversations(storageKey = STORAGE_KEY): Conversation[] {
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const saved = localStorage.getItem(storageKey);
     if (saved) {
       const stored: unknown = JSON.parse(saved);
       if (!Array.isArray(stored)) return [];
@@ -139,6 +140,7 @@ function readConversations(): Conversation[] {
       );
     }
 
+    if (storageKey !== STORAGE_KEY) return [];
     const legacy: unknown = JSON.parse(localStorage.getItem('ibp-recent-chats') || '[]');
     const migrated = Array.isArray(legacy)
       ? legacy.map((entry, conversationIndex): Conversation => {
@@ -787,13 +789,14 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
 }
 
-export default function App() {
+export default function App({ username }: { username?: string }) {
   if (new URLSearchParams(window.location.search).get('agent') === 'ewm') return <EwmQueueAgent />;
-  return <PlanningApp />;
+  return <PlanningApp username={username} />;
 }
 
-function PlanningApp() {
-  const [conversations, setConversations] = useState<Conversation[]>(readConversations);
+function PlanningApp({ username }: { username?: string }) {
+  const storageKey = username ? `${STORAGE_KEY}:${encodeURIComponent(username.toLowerCase())}` : STORAGE_KEY;
+  const [conversations, setConversations] = useState<Conversation[]>(() => readConversations(storageKey));
   const [activeId, setActiveId] = useState<string | null>(null);
   const [agentMode, setAgentMode] = useState<'ibp' | 's4' | 'maintenance' | 'scenario' | 'migration'>(() => {
     const requested = new URLSearchParams(window.location.search).get('agent');
@@ -817,7 +820,7 @@ function PlanningApp() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
+      localStorage.setItem(storageKey, JSON.stringify(conversations));
     } catch {
       setError('Conversation history could not be saved in this browser.');
     }
@@ -898,6 +901,7 @@ function PlanningApp() {
         role: 'assistant',
         content: result.reply || 'The agent returned no text.',
         insights: Array.isArray(result.insights) ? result.insights : [],
+        memory_turn_id: result.memory_turn_id,
       };
       saveConversation({
         ...optimistic,
@@ -1085,6 +1089,7 @@ function PlanningApp() {
                   : <p>{message.content}</p>}
                 {message.role === 'assistant' && message.insights && message.insights.length > 0 && <span className="message-evidence"><Database size={12} /> Evidence attached</span>}
                 {message.role === 'assistant' && <SpeakResponse text={message.content} />}
+                {message.role === 'assistant' && message.memory_turn_id && <FeedbackControls turnId={message.memory_turn_id} />}
               </article>
             ))}
             {loading && <div className="thinking" role="status"><span /><span /><span /> Agent is processing your request</div>}
