@@ -11,6 +11,15 @@ export interface ChatMessage {
   content: string;
   insights?: Insight[];
   memory_turn_id?: string | null;
+  memory_context?: MemoryContext | null;
+}
+
+export interface MemoryContext {
+  status: 'provided' | 'none' | 'not_forwarded';
+  recent_turns: number;
+  summary_turns: number;
+  summary_refresh_failed?: boolean;
+  excerpts: { date: string; source: string; question: string }[];
 }
 
 export interface Conversation {
@@ -27,4 +36,5 @@ export interface AskResponse {
   insights: Insight[];
   conversation_id: string;
   memory_turn_id?: string | null;
+  memory_context?: MemoryContext | null;
 }

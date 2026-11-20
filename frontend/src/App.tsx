@@ -41,6 +41,7 @@ import ProductMigration from './ProductMigration';
 import GenieMascot from './GenieMascot';
 import EwmQueueAgent from './EwmQueueAgent';
 import FeedbackControls from './FeedbackControls';
+import MemoryContext from './MemoryContext';
 
 const STORAGE_KEY = 'ibp-demand-desk-conversations-v1';
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -902,6 +903,7 @@ function PlanningApp({ username }: { username?: string }) {
         content: result.reply || 'The agent returned no text.',
         insights: Array.isArray(result.insights) ? result.insights : [],
         memory_turn_id: result.memory_turn_id,
+        memory_context: result.memory_context,
       };
       saveConversation({
         ...optimistic,
@@ -1088,6 +1090,7 @@ function PlanningApp({ username }: { username?: string }) {
                   ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                   : <p>{message.content}</p>}
                 {message.role === 'assistant' && message.insights && message.insights.length > 0 && <span className="message-evidence"><Database size={12} /> Evidence attached</span>}
+                {message.role === 'assistant' && message.memory_context && <MemoryContext context={message.memory_context} />}
                 {message.role === 'assistant' && <SpeakResponse text={message.content} />}
                 {message.role === 'assistant' && message.memory_turn_id && <FeedbackControls turnId={message.memory_turn_id} />}
               </article>

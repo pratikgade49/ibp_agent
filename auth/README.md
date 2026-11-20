@@ -30,6 +30,7 @@ that user's sessions. The current admin cannot disable or demote themself.
 
 Login throttling is process-local. MFA, SSO, distributed rate limiting and
 account recovery are not implemented. Protect production with an enterprise
-identity provider. Chat history is intentionally shared per agent across users;
-authentication does not make it private to an individual account. Historical
-conversations saved before authentication are not attributed to users.
+identity provider. New chat history and feedback are scoped to the authenticated
+username and agent, including the admin feedback view. Existing conversation rows
+have no owner and are excluded from all user histories until a separate, verified
+ownership migration is designed. They are not deleted.

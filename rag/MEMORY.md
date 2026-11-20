@@ -35,23 +35,27 @@ exchange; failures, closing the page, or network interruption can prevent those
 submissions. Previously held in-memory conversations and browser-local chat
 history are not imported. Only turns completed after configuration are stored.
 Recent turns are loaded by conversation ID and agent for ongoing context. A
-persisted per-agent summary incrementally folds in all stored turns, with a
+persisted per-user, per-agent summary incrementally folds in owned stored turns, with a
 coverage count and timestamp. It refreshes when the agent is queried, using the
 configured LLM; this adds model calls and cost. Individual long turns and the
 overall summary are compressed, so details may be omitted. If summary generation
 fails, recent history and retrieved excerpts remain available. For
 the four main chat agents, up to two matching archived turns from the same agent
-(including other conversations) are retrieved by keyword as untrusted historical
-context. Authenticated users share this history by design.
+(including other conversations) are retrieved by keyword from the authenticated
+user's recorded history. They are real conversation records; a previous answer
+may still be wrong or stale and must not authorize a new SAP action.
 Other agents' histories are not searched. Matching scans all saved turns for the
 agent and is intended for a small pilot; an indexed search is needed at scale.
 Requests for the previous conversation select the latest other conversation for
 the same agent and include its last four exchanges; long answers retain their
-beginning and end. "Previous" is the latest conversation
-from any user of that agent, not necessarily the requester's previous session.
+beginning and end. "Previous" is the latest other conversation by the signed-in
+user with that agent.
 This does not train a model. EWM and migration
 memory is capture only and is not yet used for their context. Conversation IDs
-are not a user ownership boundary. Helpful/unhelpful feedback and optional
-corrections are stored separately for administrator review, and are not used
+are not by themselves a user ownership boundary; all memory queries additionally
+filter by the authenticated username. Legacy records without a username are kept
+but excluded until their owners can be verified. Helpful/unhelpful feedback and optional
+corrections are stored separately; the administrator feedback view is also
+limited to the administrator's own conversations, and corrections are not used
 automatically for training. Configure
 backup, retention and deletion policies in the chosen database.

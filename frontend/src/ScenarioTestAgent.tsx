@@ -8,6 +8,7 @@ import './scenario-test-agent.css';
 import GenieMascot from './GenieMascot';
 import { VoiceConversation, SpeakResponse } from './VoiceControls';
 import FeedbackControls from './FeedbackControls';
+import MemoryContext from './MemoryContext';
 
 interface ScenarioTestAgentProps {
   messages: ChatMessage[];
@@ -89,6 +90,7 @@ export default function ScenarioTestAgent({
                   ? <div className="scenario-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                   : <p>{message.content}</p>}
                 {message.role === 'assistant' && <SpeakResponse text={message.content} />}
+                {message.role === 'assistant' && message.memory_context && <MemoryContext context={message.memory_context} />}
                 {message.role === 'assistant' && message.memory_turn_id && <FeedbackControls turnId={message.memory_turn_id} />}
               </article>
             ))}
